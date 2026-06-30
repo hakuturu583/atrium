@@ -20,6 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from typing import Any, Optional
 
+from atrium.agents.prompt_memory import PromptLayer, PromptMemory
 from atrium.core.base_agent import BaseAgent
 from atrium.core.errors import PolicyViolationError
 from atrium.core.types import GPURequest, NetworkMode, SandboxConfig, VersionTag
@@ -32,7 +33,13 @@ from atrium.protocol import (
     text_message,
 )
 
-__all__ = ["InferenceAgent", "InferenceSettings", "ChatMessage"]
+__all__ = [
+    "InferenceAgent",
+    "InferenceSettings",
+    "ChatMessage",
+    "PromptLayer",
+    "PromptMemory",
+]
 
 # An OpenAI-style chat message: ``{"role": "user"|"assistant"|"system"|"tool", "content": str}``.
 ChatMessage = dict[str, Any]
@@ -200,10 +207,15 @@ class InferenceAgent(BaseAgent, abc.ABC):
         *,
         require_gpu: bool = True,
         settings: Optional[InferenceSettings] = None,
+        prompt_memory: Optional[PromptMemory] = None,
     ) -> None:
         super().__init__(agent_id, version, sandbox_config or _secure_inference_defaults())
         self._require_gpu = require_gpu
         self.settings = settings or InferenceSettings()
+        # Layered system-prompt registry. Empty by default (non-intrusive): an
+        # empty memory composes to nothing, so behavior is unchanged until a
+        # caller records layers (or supplies one, e.g. ``default_prompt_memory``).
+        self.prompt_memory = prompt_memory if prompt_memory is not None else PromptMemory()
         self._enforce_isolation_policy()
 
     def _enforce_isolation_policy(self) -> None:
@@ -282,6 +294,34 @@ class InferenceAgent(BaseAgent, abc.ABC):
         install it on this agent (chainable convenience for ad-hoc tuning)."""
         self.settings = replace(self.settings, **changes)
         return self.settings
+
+    # ------------------------------------------------------------------ #
+    # Layered system-prompt construction                                 #
+    # ------------------------------------------------------------------ #
+    def build_system_prompt(
+        self,
+        system: Optional[str] = None,
+        *,
+        tools: Optional[list[dict[str, Any]]] = None,
+        context: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[str]:
+        """Resolve the system prompt to send for this call.
+
+        An explicit ``system`` argument always wins (callers keep full control).
+        Otherwise the agent's :attr:`prompt_memory` is composed: ``tools`` and any
+        ``context`` mapping are exposed to the layers (so the tool layer can
+        render ``ctx["tools"]``), and the synthesized string is returned — or
+        ``None`` when the memory is empty or composes to nothing, leaving the
+        request system-prompt-free exactly as before.
+        """
+        if system is not None:
+            return system
+        if not self.prompt_memory.layers:
+            return None
+        ctx: dict[str, Any] = dict(context or {})
+        ctx.setdefault("tools", tools or [])
+        composed = self.prompt_memory.compose(ctx)
+        return composed or None
 
     # ------------------------------------------------------------------ #
     # Token accounting                                                   #

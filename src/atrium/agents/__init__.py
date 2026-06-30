@@ -10,5 +10,17 @@ the unit of self-evolution (Morphing / generational swap).
 from __future__ import annotations
 
 from atrium.agents.inference_agent import InferenceAgent
+from atrium.agents.prompt_memory import (
+    PromptLayer,
+    PromptMemory,
+    default_prompt_memory,
+    tools_layer,
+)
 
-__all__ = ["InferenceAgent"]
+__all__ = [
+    "InferenceAgent",
+    "PromptLayer",
+    "PromptMemory",
+    "default_prompt_memory",
+    "tools_layer",
+]

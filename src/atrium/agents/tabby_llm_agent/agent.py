@@ -24,6 +24,7 @@ from dataclasses import fields as dc_fields
 from typing import Any, Optional
 
 from atrium.agents.inference_agent import InferenceAgent, InferenceSettings
+from atrium.agents.prompt_memory import PromptMemory
 from atrium.core.errors import ModelNotReadyError
 from atrium.core.types import SandboxConfig, VersionTag
 from atrium.protocol import (
@@ -127,6 +128,7 @@ class TabbyLLMAgent(InferenceAgent):
         config: Optional[TabbyAgentConfig] = None,
         sandbox_config: Optional[SandboxConfig] = None,
         settings: Optional[InferenceSettings] = None,
+        prompt_memory: Optional[PromptMemory] = None,
     ) -> None:
         # Lazy imports keep version/sandbox wiring inside the package directory,
         # so the agent's version and its image tag share one source of truth.
@@ -140,7 +142,11 @@ class TabbyLLMAgent(InferenceAgent):
         # Default to coding-agent-tuned settings for this machine/model; callers
         # can pass their own ``settings=`` or load them from YAML (from_yaml).
         super().__init__(
-            agent_id, version, sandbox_config, settings=settings or coding_agent_settings()
+            agent_id,
+            version,
+            sandbox_config,
+            settings=settings or coding_agent_settings(),
+            prompt_memory=prompt_memory,
         )
         self._model_ready = False
 
@@ -153,9 +159,11 @@ class TabbyLLMAgent(InferenceAgent):
         *,
         sandbox_config: Optional[SandboxConfig] = None,
     ) -> "TabbyLLMAgent":
-        """Construct an agent from a YAML file with ``tabby:`` and ``inference:``
-        sections. Inference keys override the coding-agent defaults; any omitted
-        key keeps its tuned default. Either section may be absent.
+        """Construct an agent from a YAML file with ``tabby:``, ``inference:`` and
+        ``prompt:`` sections. Inference keys override the coding-agent defaults;
+        any omitted key keeps its tuned default. The ``prompt:`` block defines the
+        layered system prompt (see :class:`~atrium.agents.prompt_memory.PromptMemory`).
+        Any section may be absent.
 
         Example::
 
@@ -169,12 +177,14 @@ class TabbyLLMAgent(InferenceAgent):
             raise ValueError(f"{path}: top-level YAML must be a mapping")
         config = TabbyAgentConfig.from_mapping(doc.get("tabby"))
         settings = coding_agent_settings().merge(doc.get("inference"))
+        prompt_memory = PromptMemory.from_mapping(doc.get("prompt"))
         return cls(
             agent_id,
             version,
             config=config,
             sandbox_config=sandbox_config,
             settings=settings,
+            prompt_memory=prompt_memory,
         )
 
     # ------------------------------------------------------------------ #
@@ -276,7 +286,11 @@ class TabbyLLMAgent(InferenceAgent):
         Returns the assistant text. When the model elects to call tools, returns
         a JSON string of the ``tool_calls`` so the caller can execute them and
         continue via :meth:`chat`. Retries on ``not_ready`` (model quantizing).
+
+        When ``system`` is omitted, the agent's layered ``prompt_memory`` is
+        composed into the system message (a no-op when the memory is empty).
         """
+        system = self.build_system_prompt(system, tools=tools)
         request: dict[str, Any] = {
             "type": KIND_INFER,
             "messages": _to_messages(prompt, system),
@@ -314,7 +328,15 @@ class TabbyLLMAgent(InferenceAgent):
 
         Oversized histories are compacted (older turns summarized) before the
         request is sent, per the agent's :class:`InferenceSettings`.
+
+        When the history carries no ``system`` turn, the agent's layered
+        ``prompt_memory`` is composed and prepended as one (a no-op when the
+        memory is empty); an existing system turn is always left untouched.
         """
+        if not any(m.get("role") == "system" for m in messages):
+            system = self.build_system_prompt(None, tools=tools)
+            if system:
+                messages = [{"role": "system", "content": system}, *messages]
         messages = await self.compact_messages(messages)
         request: dict[str, Any] = {
             "type": KIND_INFER,
