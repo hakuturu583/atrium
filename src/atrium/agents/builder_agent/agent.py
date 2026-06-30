@@ -42,7 +42,7 @@ from atrium.agents.builder_agent.sandbox import (
 from atrium.core import telemetry as tel
 from atrium.core.base_agent import BaseAgent
 from atrium.core.errors import PolicyViolationError
-from atrium.core.registry import image_ref_from_tag
+from atrium.core.registry import LocalRegistryError, RegistryClient, image_ref_from_tag
 from atrium.core.types import ExecutionResult, NetworkMode, SandboxConfig, VersionTag
 from atrium.protocol import (
     Message,
@@ -112,6 +112,7 @@ class BuilderAgent(BaseAgent):
         *,
         sandbox_config: Optional[SandboxConfig] = None,
         registry: str = DEFAULT_REGISTRY,
+        registry_endpoint: Optional[str] = None,
         build_timeout_s: float = DEFAULT_BUILD_TIMEOUT_S,
     ) -> None:
         from atrium.agents.builder_agent import __version__
@@ -121,6 +122,11 @@ class BuilderAgent(BaseAgent):
         super().__init__(agent_id, version, sandbox_config)
 
         self.registry = registry
+        # Host-side HTTP endpoint (host:port) to the registry, used only for the
+        # pre-build version-collision guard. It differs from ``registry`` (the
+        # in-sandbox push name); leave None to disable the guard (e.g. until the
+        # registry enforces tag immutability itself).
+        self.registry_endpoint = registry_endpoint
         self.build_timeout_s = build_timeout_s
         self._enforce_build_policy()
 
@@ -178,6 +184,16 @@ class BuilderAgent(BaseAgent):
             tag = self._image_tag(name, version)
             span.set_attribute("atrium.build.image", tag)
 
+            # Collision guard: generations are immutable, so refuse to rebuild a
+            # version that already exists. Skipped when no host-side registry
+            # endpoint is configured, and fail-open (proceed) if the registry is
+            # unreachable — it is a best-effort guard, not the source of truth.
+            if self._version_exists(name, version):
+                return self._error_message(
+                    message,
+                    f"version already exists: {tag} (generations are immutable — bump the version)",
+                )
+
             # Ensure the rootless build sandbox is up (idempotent).
             await self.start_sandbox()
 
@@ -201,6 +217,21 @@ class BuilderAgent(BaseAgent):
             return self._error_message(
                 message, f"kaniko build failed for {tag}", result=result
             )
+
+    def _version_exists(self, name: str, version: str) -> bool:
+        """Best-effort: whether ``name:version`` already exists in the registry.
+
+        Returns ``False`` (allow the build) when no ``registry_endpoint`` is
+        configured or the registry is unreachable — the guard only blocks on a
+        *confirmed* collision, never on its own inability to check.
+        """
+        if not self.registry_endpoint:
+            return False
+        try:
+            return RegistryClient(self.registry_endpoint).exists(name, version)
+        except LocalRegistryError as exc:
+            logger.warning("version-collision guard skipped (registry unreachable): %s", exc)
+            return False
 
     # ------------------------------------------------------------------ #
     # Request parsing / validation                                       #
