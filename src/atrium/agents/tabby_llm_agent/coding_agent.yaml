@@ -33,3 +33,33 @@ tabby:
   model_name: Ornith-1.0-35B-EXL3-4.0bpw
   max_retries: 60
   retry_backoff_s: 2.0
+
+prompt:
+  # Layered system prompt. `order` lists the kept layers in the sequence they
+  # compose (any layer not listed falls back to its numeric `order`). Empty-bodied
+  # layers are dropped, so omit/blank a section to leave it out. When the caller
+  # passes no explicit `system=`, these layers are composed into the system message.
+  order: [identity, tool_guidance, tools, rules, memory, environment, objective]
+  layers:
+    identity:
+      order: 10
+      content: "You are a focused coding agent. Produce correct, minimal patches."
+    tool_guidance:
+      order: 30
+      content: "Prefer the provided tools over shell when one fits. Call one tool at a time."
+    tools:
+      order: 40
+      mode: json_schema          # render tool schemas into the prompt as <tools>...</tools>
+      # mode: native             # ...or pass schemas via the request `tools` field instead
+    rules:
+      order: 60
+      content: "Read a file before editing it. Match the surrounding code style."
+    memory:
+      order: 70
+      content: ""                # filled at runtime (e.g. project notes)
+    environment:
+      order: 80
+      content: ""                # filled at runtime (cwd, git status, platform)
+    objective:
+      order: 90
+      content: ""                # filled at runtime (the current task)
