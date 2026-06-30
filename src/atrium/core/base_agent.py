@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import base64
 import logging
-from typing import Any, Optional, Union
+import shlex
+from typing import Any, Mapping, Optional, Union
 
 from atrium.core import telemetry as tel
 from atrium.core.errors import AgentError, SandboxError, SandboxNotRunningError
@@ -160,6 +162,33 @@ class BaseAgent(abc.ABC):
             span.set_attribute("atrium.exit_code", result.exit_code)
             span.set_attribute(tel.OUTPUT_VALUE, result.stdout[-4096:])
             return result
+
+    async def write_files_to_sandbox(
+        self, files: Mapping[str, bytes], dest: str, *, clean: bool = False
+    ) -> ExecutionResult:
+        """Stage ``{relative_path: content}`` files under ``dest`` in the sandbox.
+
+        OpenShell exposes only command execution (no host→container file copy),
+        so each file is base64-encoded host-side and decoded in-container — safe
+        for binary content and shell metacharacters alike. Each parent directory
+        is created once; ``clean=True`` empties ``dest`` first. Callers are
+        responsible for validating ``relative_path`` (no traversal) beforehand.
+        """
+        dest_q = shlex.quote(dest)
+        lines = ["set -eu"]
+        if clean:
+            lines.append(f"rm -rf {dest_q}/* {dest_q}/.[!.]* 2>/dev/null || true")
+        lines.append(f"mkdir -p {dest_q}")
+        made_dirs = {dest}
+        for relpath, content in files.items():
+            path = f"{dest}/{relpath}"
+            parent = path.rsplit("/", 1)[0]
+            if parent not in made_dirs:
+                made_dirs.add(parent)
+                lines.append(f"mkdir -p {shlex.quote(parent)}")
+            b64 = base64.b64encode(content).decode("ascii")
+            lines.append(f"printf '%s' {shlex.quote(b64)} | base64 -d > {shlex.quote(path)}")
+        return await self.execute_in_sandbox("\n".join(lines))
 
     # ------------------------------------------------------------------ #
     # A2A communication                                                  #

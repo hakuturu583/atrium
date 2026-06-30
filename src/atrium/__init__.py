@@ -8,6 +8,8 @@ Public surface:
   inference base.
 * :class:`~atrium.agents.tabby_llm_agent.TabbyLLMAgent` — concrete inference
   agent backed by tabbyAPI / exllamav3, spoken to exclusively over A2A.
+* :class:`~atrium.agents.builder_agent.BuilderAgent` — fixed-infrastructure agent
+  that builds agent images with rootless Kaniko (no host Docker daemon).
 
 Communication between agents is A2A throughout (via ``a2a-sdk``); the host
 package never imports ``httpx`` (that lives in the agent container images).
@@ -15,6 +17,7 @@ package never imports ``httpx`` (that lives in the agent container images).
 
 from __future__ import annotations
 
+from atrium.agents.builder_agent import BuilderAgent
 from atrium.agents.inference_agent import InferenceAgent
 from atrium.agents.tabby_llm_agent import TabbyAgentConfig, TabbyLLMAgent
 from atrium.core.base_agent import BaseAgent
@@ -31,6 +34,7 @@ __all__ = [
     "InferenceAgent",
     "TabbyLLMAgent",
     "TabbyAgentConfig",
+    "BuilderAgent",
     "SandboxConfig",
     "NetworkMode",
     "GPURequest",

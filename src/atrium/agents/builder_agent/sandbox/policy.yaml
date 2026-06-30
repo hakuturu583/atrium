@@ -1,0 +1,38 @@
+# OpenShell network/permission policy for the BuilderAgent sandbox.
+#
+# Security envelope: this container performs ROOTLESS image builds (Kaniko) on
+# behalf of the rest of the runtime. It must NOT be able to reach the public
+# internet (WAN) — even if a malicious Dockerfile tries to phone home during a
+# build — yet it must reach the host-local `local-registry` to push the result
+# and the control plane over the container LAN (A2A).
+#
+# This file is the package-internal source of truth for the build envelope; it
+# is referenced via SandboxConfig.policy_path (see sandbox/config.py). Exact
+# schema may vary with the installed OpenShell version; pin/adjust as needed.
+version: 1
+
+network:
+  # Deny egress by default; only explicitly-allowed host-local ranges pass.
+  default_egress: deny
+  allow:
+    - cidr: 127.0.0.0/8     # loopback (kaniko cache, in-container tools)
+    - cidr: 10.0.0.0/8      # host-local container LAN: local-registry + control plane (A2A)
+    - cidr: 172.16.0.0/12   # docker/podman bridge ranges (local-registry)
+  deny:
+    - cidr: 0.0.0.0/0       # everything else, i.e. the public internet
+
+filesystem:
+  # Read-only root: the build only writes to the explicit scratch areas below.
+  read_only_root: true
+  writable:
+    - /workspace          # build context (source + Dockerfile)
+    - /kaniko             # kaniko's own scratch / .docker config / cache
+    - /tmp
+
+process:
+  # Rootless posture: no privilege escalation, drop every Linux capability.
+  # Combined with the absence of any docker.sock mount, the build can never
+  # reach the host Docker daemon or run --privileged.
+  no_new_privileges: true
+  drop_capabilities:
+    - ALL
