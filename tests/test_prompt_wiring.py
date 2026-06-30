@@ -59,10 +59,19 @@ def test_explicit_system_overrides_memory():
 
 
 def test_empty_memory_yields_no_system_message():
-    agent, captured = _agent_with_capture()  # default empty PromptMemory
+    agent, captured = _agent_with_capture(PromptMemory())  # explicitly empty
     asyncio.run(agent.infer("hi"))
     messages = captured["request"]["messages"]
     assert all(m["role"] != "system" for m in messages)
+
+
+def test_default_agent_boots_with_coding_prompt_memory():
+    # A bare TabbyLLMAgent (no prompt_memory=) gets the coding-agent default.
+    agent, captured = _agent_with_capture()
+    asyncio.run(agent.infer("hi"))
+    system = captured["request"]["messages"][0]
+    assert system["role"] == "system"
+    assert "coding agent" in system["content"]
 
 
 def test_chat_prepends_system_only_when_absent():

@@ -24,7 +24,7 @@ from dataclasses import fields as dc_fields
 from typing import Any, Optional
 
 from atrium.agents.inference_agent import InferenceAgent, InferenceSettings
-from atrium.agents.prompt_memory import PromptMemory
+from atrium.agents.prompt_memory import PromptLayer, PromptMemory, default_prompt_memory
 from atrium.core.errors import ModelNotReadyError
 from atrium.core.types import SandboxConfig, VersionTag
 from atrium.protocol import (
@@ -51,7 +51,12 @@ STATUS_OK = "ok"
 STATUS_NOT_READY = "not_ready"
 STATUS_TOOL_CALLS = "tool_calls"
 
-__all__ = ["TabbyLLMAgent", "TabbyAgentConfig", "coding_agent_settings"]
+__all__ = [
+    "TabbyLLMAgent",
+    "TabbyAgentConfig",
+    "coding_agent_settings",
+    "coding_agent_prompt_memory",
+]
 
 
 def coding_agent_settings() -> InferenceSettings:
@@ -83,6 +88,66 @@ def coding_agent_settings() -> InferenceSettings:
         compaction_summary_max_tokens=1024,
         compaction_summary_temperature=0.2,
     )
+
+
+def coding_agent_prompt_memory() -> PromptMemory:
+    """Default layered system prompt for the coding-agent preset.
+
+    Built on :func:`~atrium.agents.prompt_memory.default_prompt_memory`'s
+    canonical order, with the *stable* layers (identity / tone / tool_guidance /
+    rules) filled with coding-agent guidance and the *volatile* layers
+    (capabilities / memory / environment / objective / user_instructions) left
+    empty for the caller to populate per turn (empties are skipped on compose).
+    The ``tools`` layer renders provided tool schemas as a ``<tools>`` block.
+
+    This is to the system prompt what :func:`coding_agent_settings` is to the
+    generation knobs: the tuned default a bare ``TabbyLLMAgent`` boots with.
+    """
+    memory = default_prompt_memory()
+    memory.record(
+        PromptLayer(
+            "identity",
+            order=10,
+            content=(
+                "You are a focused coding agent working inside an isolated, "
+                "WAN-cut-off sandbox. Produce correct, minimal, well-targeted "
+                "changes."
+            ),
+        )
+    )
+    memory.record(
+        PromptLayer(
+            "tone",
+            order=20,
+            content=(
+                "Be concise and direct. Prefer concrete actions and code over "
+                "prose, and match the conventions of the surrounding codebase."
+            ),
+        )
+    )
+    memory.record(
+        PromptLayer(
+            "tool_guidance",
+            order=30,
+            content=(
+                "Prefer the provided tools over ad-hoc shell when a tool fits. "
+                "Call one tool at a time and wait for its result before the next. "
+                "Read a file before editing it."
+            ),
+        )
+    )
+    memory.record(
+        PromptLayer(
+            "rules",
+            order=60,
+            content=(
+                "Keep changes minimal and reversible; avoid unrelated edits. "
+                "Verify your work by running tests when possible. Stay within the "
+                "sandbox — never attempt network egress or data exfiltration."
+            ),
+        )
+    )
+    return memory
 
 
 @dataclass(slots=True)
@@ -139,14 +204,15 @@ class TabbyLLMAgent(InferenceAgent):
         sandbox_config = sandbox_config or build_sandbox_config(str(version))
 
         self.config = config or TabbyAgentConfig()
-        # Default to coding-agent-tuned settings for this machine/model; callers
-        # can pass their own ``settings=`` or load them from YAML (from_yaml).
+        # Default to coding-agent-tuned settings *and* the coding-agent layered
+        # system prompt for this machine/model; callers can pass their own
+        # ``settings=`` / ``prompt_memory=`` or load them from YAML (from_yaml).
         super().__init__(
             agent_id,
             version,
             sandbox_config,
             settings=settings or coding_agent_settings(),
-            prompt_memory=prompt_memory,
+            prompt_memory=prompt_memory or coding_agent_prompt_memory(),
         )
         self._model_ready = False
 
@@ -161,9 +227,11 @@ class TabbyLLMAgent(InferenceAgent):
     ) -> "TabbyLLMAgent":
         """Construct an agent from a YAML file with ``tabby:``, ``inference:`` and
         ``prompt:`` sections. Inference keys override the coding-agent defaults;
-        any omitted key keeps its tuned default. The ``prompt:`` block defines the
-        layered system prompt (see :class:`~atrium.agents.prompt_memory.PromptMemory`).
-        Any section may be absent.
+        any omitted key keeps its tuned default. A ``prompt:`` block fully defines
+        the layered system prompt (see
+        :class:`~atrium.agents.prompt_memory.PromptMemory`); when it is omitted the
+        coding-agent default (:func:`coding_agent_prompt_memory`) is kept. Any
+        section may be absent.
 
         Example::
 
@@ -177,7 +245,8 @@ class TabbyLLMAgent(InferenceAgent):
             raise ValueError(f"{path}: top-level YAML must be a mapping")
         config = TabbyAgentConfig.from_mapping(doc.get("tabby"))
         settings = coding_agent_settings().merge(doc.get("inference"))
-        prompt_memory = PromptMemory.from_mapping(doc.get("prompt"))
+        # Omitted ``prompt:`` -> None -> constructor keeps the coding-agent default.
+        prompt_memory = PromptMemory.from_mapping(doc["prompt"]) if "prompt" in doc else None
         return cls(
             agent_id,
             version,
