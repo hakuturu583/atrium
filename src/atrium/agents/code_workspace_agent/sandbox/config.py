@@ -99,11 +99,11 @@ def build_sandbox_config(
     if gh_token:
         sandbox_env[token_env] = gh_token
 
-    forwarded: dict[str, str] = {}
-    if forward_github_token:
-        # Forward each well-known GitHub token var under its own name; resolution
-        # at create time silently skips any that are unset on the host.
-        forwarded.update({var: var for var in GITHUB_TOKEN_ENV_VARS})
+    # Forward each well-known GitHub token var under its own name; resolution at
+    # create time silently skips any that are unset on the host.
+    forwarded: dict[str, str] = (
+        {var: var for var in GITHUB_TOKEN_ENV_VARS} if forward_github_token else {}
+    )
     if secret_env:
         forwarded.update(secret_env)
 

@@ -66,11 +66,11 @@ def _resolve_secret_env(
     on the host; mappings with an unset ``host_var`` are skipped. Kept pure (no
     process state) so it is unit-testable without the OpenShell CLI.
     """
-    resolved: dict[str, str] = {}
-    for container_var, host_var in secret_env.items():
-        if host_var in environ:
-            resolved[container_var] = environ[host_var]
-    return resolved
+    return {
+        container_var: environ[host_var]
+        for container_var, host_var in secret_env.items()
+        if host_var in environ
+    }
 
 
 async def _run(
@@ -81,7 +81,8 @@ async def _run(
     """Run an ``openshell`` subcommand and capture its result.
 
     ``env`` overrides the child process environment (used to hand secret values to
-    OpenShell out-of-band, so they never appear in ``args``/the command line).
+    OpenShell out-of-band, so they never appear in ``args``/the command line). It
+    is passed straight through; ``create_subprocess_exec`` does not mutate it.
     """
     _require_cli()
     command = f"{OPENSHELL_BIN} {' '.join(shlex.quote(a) for a in args)}"
@@ -92,7 +93,7 @@ async def _run(
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=dict(env) if env is not None else None,
+            env=env,
         )
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError as exc:
