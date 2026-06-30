@@ -19,6 +19,7 @@ module does not require either (the SDK is imported lazily inside the calls).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import urllib.error
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from atrium.core.errors import AtriumError
+from atrium.core.types import VersionTag
 
 logger = logging.getLogger("atrium.registry")
 
@@ -37,7 +39,24 @@ __all__ = [
     "registry_healthy",
     "stop_local_registry",
     "image_ref_from_tag",
+    "AgentRef",
+    "next_version",
+    "ACTIVE_TAG",
+    "RegistryClient",
 ]
+
+#: The mutable tag that names the live generation of an agent (the active pointer).
+ACTIVE_TAG = "active"
+
+#: Manifest media types we accept when resolving a tag/digest to a manifest.
+_MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+    )
+)
 
 #: Bind to /var/lib/registry inside the registry:2 container.
 _REGISTRY_DATA_DIR = "/var/lib/registry"
@@ -52,6 +71,44 @@ def image_ref_from_tag(tag: str, digest: str) -> str:
     ``repo@digest`` references identically.
     """
     return f"{tag.rsplit(':', 1)[0]}@{digest}"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentRef:
+    """A pinned reference to one agent generation in the registry (ledger).
+
+    ``slug`` is the agent's repository; ``version`` is the (mutable) tag it was
+    resolved through — a semver like ``"0.2.0"`` or the ``"active"`` pointer, or
+    ``None`` when only the digest is known; ``digest`` is the immutable
+    ``sha256:…`` identity. Pull/launch by digest, never by the bare tag.
+    """
+
+    slug: str
+    digest: Optional[str] = None
+    version: Optional[str] = None
+
+    def pull_ref(self, registry: str) -> str:
+        """``<registry>/<slug>@<digest>`` (immutable) when a digest is known,
+        else the tag ref ``<registry>/<slug>:<version>``."""
+        if self.digest:
+            return f"{registry}/{self.slug}@{self.digest}"
+        if self.version:
+            return f"{registry}/{self.slug}:{self.version}"
+        raise ValueError(f"AgentRef for {self.slug!r} has neither digest nor version")
+
+
+def next_version(current: "str | VersionTag", level: str = "patch") -> VersionTag:
+    """Compute the next semantic version from ``current`` by bumping ``level``.
+
+    ``level`` is ``"major"``/``"minor"``/``"patch"`` (default patch). Thin wrapper
+    over :mod:`semver`'s bump methods so the whole runtime computes generations
+    the same way.
+    """
+    version = current if isinstance(current, VersionTag) else VersionTag.parse(str(current))
+    bumps = {"major": version.bump_major, "minor": version.bump_minor, "patch": version.bump_patch}
+    if level not in bumps:
+        raise ValueError(f"level must be one of {sorted(bumps)}, got {level!r}")
+    return bumps[level]()
 
 
 class LocalRegistryError(AtriumError):
@@ -233,3 +290,105 @@ def _wait_until_healthy(config: RegistryConfig) -> None:
             )
         time.sleep(delay)
         delay = min(delay * 1.5, 2.0)
+
+
+class RegistryClient:
+    """Read / limited-write client for the local registry — the generation ledger.
+
+    Speaks the registry **v2 HTTP API** over stdlib ``urllib`` (the host package
+    never imports ``httpx``). Reads — :meth:`versions`, :meth:`digest`,
+    :meth:`active`, :meth:`exists` — are open to any caller; :meth:`set_active`
+    moves the ``<slug>:active`` pointer and is intended for the trusted Morpher
+    only (the runtime restricts the credential, not this object).
+    """
+
+    def __init__(self, endpoint: str, *, scheme: str = "http", timeout: float = 5.0) -> None:
+        self.endpoint = endpoint  # host:port the registry serves on
+        self._base = f"{scheme}://{endpoint}"
+        self._timeout = timeout
+
+    @classmethod
+    def from_config(cls, config: RegistryConfig, *, timeout: float = 5.0) -> "RegistryClient":
+        """Build a client for the registry described by ``config`` (its host:port, HTTP)."""
+        return cls(config.endpoint, scheme="http", timeout=timeout)
+
+    # ---- reads ---------------------------------------------------------- #
+    def versions(self, slug: str, *, semver_only: bool = True) -> list[str]:
+        """Return ``slug``'s pushed version tags (its history), ascending.
+
+        Excludes the mutable ``active`` pointer. With ``semver_only`` (default),
+        non-semver tags are dropped and the rest are sorted semantically.
+        """
+        _, _, body = self._open("GET", f"/v2/{slug}/tags/list")
+        if body is None:
+            return []
+        tags = [t for t in (json.loads(body).get("tags") or []) if t != ACTIVE_TAG]
+        if not semver_only:
+            return sorted(tags)
+        parsed: list[VersionTag] = []
+        for tag in tags:
+            try:
+                parsed.append(VersionTag.parse(tag))
+            except ValueError:
+                continue
+        return [str(v) for v in sorted(parsed)]
+
+    def digest(self, slug: str, reference: str) -> Optional[str]:
+        """Resolve ``<slug>:<reference>`` (a tag or digest) to its immutable
+        manifest digest (``sha256:…``), or ``None`` when it does not exist."""
+        status, headers, _ = self._open(
+            "HEAD", f"/v2/{slug}/manifests/{reference}", headers={"Accept": _MANIFEST_ACCEPT}
+        )
+        if status == 404:
+            return None
+        return headers.get("Docker-Content-Digest")
+
+    def exists(self, slug: str, version: str) -> bool:
+        """Whether a version tag already exists — the app-side collision guard
+        (generations are immutable; never overwrite an existing version tag)."""
+        return self.digest(slug, version) is not None
+
+    def active(self, slug: str) -> Optional[AgentRef]:
+        """The live generation (``<slug>:active``) as an :class:`AgentRef`, or None."""
+        dig = self.digest(slug, ACTIVE_TAG)
+        return AgentRef(slug=slug, digest=dig, version=ACTIVE_TAG) if dig else None
+
+    # ---- write (Morpher-only) ------------------------------------------ #
+    def set_active(self, slug: str, digest: str) -> None:
+        """Point ``<slug>:active`` at an existing ``digest`` (promote / rollback).
+
+        Re-tags by re-PUTting the existing manifest under the ``active`` tag —
+        no blobs move. Raises if the digest is not already in the registry.
+        """
+        _, headers, manifest = self._open(
+            "GET", f"/v2/{slug}/manifests/{digest}", headers={"Accept": _MANIFEST_ACCEPT}
+        )
+        if manifest is None:  # _open returns body=None only on 404
+            raise LocalRegistryError(f"cannot set active: {slug}@{digest} not in registry")
+        self._open(
+            "PUT",
+            f"/v2/{slug}/manifests/{ACTIVE_TAG}",
+            data=manifest,
+            headers={"Content-Type": headers.get("Content-Type", _MANIFEST_ACCEPT)},
+        )
+
+    # ---- HTTP plumbing -------------------------------------------------- #
+    def _open(self, method: str, path: str, *, data=None, headers=None):
+        """One registry HTTP call → ``(status, headers, body)``.
+
+        A ``404`` is returned as ``(404, headers, None)`` (an expected "absent"
+        answer for reads); any other transport/HTTP failure raises
+        :class:`LocalRegistryError`.
+        """
+        req = urllib.request.Request(
+            f"{self._base}{path}", method=method, data=data, headers=headers or {}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                return resp.status, resp.headers, resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return 404, exc.headers, None
+            raise LocalRegistryError(f"registry {method} {path} -> HTTP {exc.code}") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise LocalRegistryError(f"registry {method} {path} unreachable: {exc}") from exc

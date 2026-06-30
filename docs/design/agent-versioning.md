@@ -182,11 +182,14 @@ solely by fixed infrastructure and gated by supply-chain proof.
    successful build reply carries the immutable `digest` (`sha256:…`) plus the
    content-addressed `image_ref` (`<registry>/<name>@<digest>`) alongside the tag.
    Push is to `<slug>:<version>` only (BuilderAgent never moves `:active`).
-3. `next_version(slug, level)` helper; app-side `tags/list` collision guard until
-   registry tag-immutability is configured. — TODO
-4. Registry **client** in `atrium/core/registry.py` — `versions(slug)`,
-   `digest(slug, version)`, `active(slug)`, `set_active(slug, digest)` (Morpher-only);
-   `AgentRef(slug, version, digest)` typed view. — TODO
+3. `next_version(current, level)` helper — ✅ implemented (semver bump). The
+   app-side `tags/list` collision guard (`RegistryClient.exists`) lands here; wiring
+   it into BuilderAgent's build path is — TODO.
+4. **Registry client** — ✅ implemented in `atrium/core/registry.py`:
+   `RegistryClient.versions(slug)` / `digest(slug, ref)` / `exists(slug, version)` /
+   `active(slug)` / `set_active(slug, digest)` (Morpher-only re-tag), plus the
+   `AgentRef(slug, digest, version)` typed view. Speaks the registry v2 HTTP API
+   over stdlib urllib.
 5. Agent **factory** `create_agent(slug)`: resolve `:active` → start at that digest
    (replaces `__version__` defaulting on the evolving path). — TODO
 6. Attestation verify + `set_active` + audit log, owned by a (future) Morpher. — TODO
