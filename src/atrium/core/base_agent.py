@@ -80,10 +80,19 @@ class BaseAgent(abc.ABC):
     # ------------------------------------------------------------------ #
     # Identity                                                           #
     # ------------------------------------------------------------------ #
+    @classmethod
+    def slug_for(cls) -> str:
+        """The image slug for this agent *class* (class name unless overridden).
+
+        The class-level counterpart to :attr:`agent_slug`, so a factory can derive
+        the slug without an instance.
+        """
+        return cls.AGENT_SLUG or cls.__name__.lower()
+
     @property
     def agent_slug(self) -> str:
-        """The image slug for this agent (class name unless overridden)."""
-        return self.AGENT_SLUG or type(self).__name__.lower()
+        """The image slug for this agent (see :meth:`slug_for`)."""
+        return type(self).slug_for()
 
     @property
     def image_name(self) -> str:

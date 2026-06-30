@@ -192,6 +192,11 @@ solely by fixed infrastructure and gated by supply-chain proof.
    `active(slug)` / `set_active(slug, digest)` (Morpher-only re-tag), plus the
    `AgentRef(slug, digest, version)` typed view. Speaks the registry v2 HTTP API
    over stdlib urllib.
-5. Agent **factory** `create_agent(slug)`: resolve `:active` → start at that digest
-   (replaces `__version__` defaulting on the evolving path). — TODO
+5. **Agent factory** — ✅ implemented in `atrium/core/factory.py`:
+   `resolve_active_ref(slug)` / `active_image(slug)` resolve `<slug>:active` → the
+   immutable `<registry>/<slug>@<digest>`; `create_agent(cls, …)` /
+   `create_agent_by_slug(slug, …)` construct the agent and pin
+   `sandbox_config.image` to it, so `start_sandbox()` launches the live generation
+   instead of the `__version__` default. A slug→class registry
+   (`register_agent_type`) backs the by-slug form.
 6. Attestation verify + `set_active` + audit log, owned by a (future) Morpher. — TODO
