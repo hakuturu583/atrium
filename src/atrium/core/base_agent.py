@@ -25,12 +25,13 @@ import asyncio
 import base64
 import logging
 import shlex
+from pathlib import PurePosixPath
 from typing import Any, Mapping, Optional, Union
 
 from atrium.core import telemetry as tel
-from atrium.core.errors import AgentError, SandboxError, SandboxNotRunningError
+from atrium.core.errors import AgentError, PolicyViolationError, SandboxError, SandboxNotRunningError
 from atrium.core.types import ExecutionResult, SandboxConfig, VersionTag
-from atrium.protocol import Message
+from atrium.protocol import Message, get_message_data
 from atrium.protocol.a2a_transport import SendTarget, send_message
 from atrium.sandbox import Sandbox
 
@@ -189,6 +190,69 @@ class BaseAgent(abc.ABC):
             b64 = base64.b64encode(content).decode("ascii")
             lines.append(f"printf '%s' {shlex.quote(b64)} | base64 -d > {shlex.quote(path)}")
         return await self.execute_in_sandbox("\n".join(lines))
+
+    # ------------------------------------------------------------------ #
+    # Shared request / file validation helpers                          #
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def merge_data_parts(message: Message) -> dict[str, Any]:
+        """Merge every structured ``DataPart`` of ``message`` into one mapping.
+
+        The common shape for a structured A2A request: a single logical payload
+        spread across one or more ``DataPart``s. Later parts win on key clashes.
+        """
+        merged: dict[str, Any] = {}
+        for part in get_message_data(message):
+            if isinstance(part, dict):
+                merged.update(part)
+        return merged
+
+    @staticmethod
+    def check_safe_relpath(name: Any) -> None:
+        """Reject absolute paths and ``..`` traversal in a context-relative name.
+
+        The single audited guard for any caller staging caller-supplied files into
+        the sandbox; raises ``ValueError`` on an unsafe name.
+        """
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"invalid filename: {name!r}")
+        pure = PurePosixPath(name)
+        if pure.is_absolute() or ".." in pure.parts:
+            raise ValueError(f"unsafe filename (absolute or traversal): {name!r}")
+
+    @classmethod
+    def coerce_file_content(cls, fname: Any, content: Any) -> bytes:
+        """Validate ``fname`` and decode ``content`` to bytes.
+
+        Accepts ``str`` (UTF-8 text — the common case for source/config files) or
+        a ``{"encoding": "base64", "content": "..."}`` mapping for binary blobs.
+        """
+        cls.check_safe_relpath(fname)
+        if isinstance(content, str):
+            return content.encode("utf-8")
+        if isinstance(content, Mapping) and content.get("encoding") == "base64":
+            try:
+                return base64.b64decode(str(content.get("content", "")), validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ValueError(f"invalid base64 content for {fname!r}") from exc
+        raise ValueError(
+            f"unsupported content for {fname!r}: expected str or base64 mapping"
+        )
+
+    def forbid_docker_socket(self) -> None:
+        """Refuse a sandbox config that mounts the host Docker socket.
+
+        The single audited guard against the most dangerous escape an autonomous
+        agent could be handed (the host daemon); used by every agent whose
+        envelope must never reach it. Raises :class:`PolicyViolationError`.
+        """
+        cfg = self.sandbox_config
+        for path in (*cfg.volumes.keys(), *cfg.volumes.values()):
+            if "docker.sock" in path:
+                raise PolicyViolationError(
+                    f"{type(self).__name__} must never mount the Docker socket "
+                    f"(found volume referencing {path!r})"
+                )
 
     # ------------------------------------------------------------------ #
     # A2A communication                                                  #

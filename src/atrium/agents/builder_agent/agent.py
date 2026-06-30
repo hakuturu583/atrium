@@ -27,10 +27,8 @@ shows up stitched into the same Phoenix trace as the request.
 
 from __future__ import annotations
 
-import base64
 import re
 import shlex
-from pathlib import PurePosixPath
 from typing import Any, Mapping, Optional
 
 from atrium.agents.builder_agent.sandbox import (
@@ -42,13 +40,7 @@ from atrium.core import telemetry as tel
 from atrium.core.base_agent import BaseAgent
 from atrium.core.errors import PolicyViolationError
 from atrium.core.types import ExecutionResult, NetworkMode, SandboxConfig, VersionTag
-from atrium.protocol import (
-    Message,
-    Role,
-    data_part,
-    get_message_data,
-    text_message,
-)
+from atrium.protocol import Message, Role, data_part, text_message
 
 __all__ = ["BuilderAgent"]
 
@@ -140,12 +132,8 @@ class BuilderAgent(BaseAgent):
                 f"{type(self).__name__} must not request GPU passthrough "
                 "(a rootless image build needs none)"
             )
-        for path in (*cfg.volumes.keys(), *cfg.volumes.values()):
-            if "docker.sock" in path:
-                raise PolicyViolationError(
-                    f"{type(self).__name__} must never mount the Docker socket "
-                    f"(found volume referencing {path!r}); builds are rootless"
-                )
+        # Crucially, builds are rootless: never mount the host Docker socket.
+        self.forbid_docker_socket()
 
     # ------------------------------------------------------------------ #
     # A2A entry point                                                    #
@@ -158,7 +146,7 @@ class BuilderAgent(BaseAgent):
         Validation/build failures are returned as structured error messages (so a
         TaskAgent can react) rather than raised.
         """
-        request = self._merge_data(message)
+        request = self.merge_data_parts(message)
         with tel.start_span(
             "builder.build",
             kind=tel.TOOL,
@@ -196,15 +184,6 @@ class BuilderAgent(BaseAgent):
     # ------------------------------------------------------------------ #
     # Request parsing / validation                                       #
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def _merge_data(message: Message) -> dict[str, Any]:
-        """Merge every structured ``DataPart`` of the message into one mapping."""
-        merged: dict[str, Any] = {}
-        for part in get_message_data(message):
-            if isinstance(part, dict):
-                merged.update(part)
-        return merged
-
     def _parse_request(
         self, data: Mapping[str, Any]
     ) -> tuple[str, str, dict[str, bytes], str, dict[str, str]]:
@@ -224,10 +203,10 @@ class BuilderAgent(BaseAgent):
         raw_files = data.get("files")
         if not isinstance(raw_files, Mapping) or not raw_files:
             raise ValueError("files must be a non-empty {filename: content} map")
-        files = {fname: self._coerce_content(fname, content) for fname, content in raw_files.items()}
+        files = {fname: self.coerce_file_content(fname, content) for fname, content in raw_files.items()}
 
         dockerfile = data.get("dockerfile", DEFAULT_DOCKERFILE)
-        self._check_safe_path(dockerfile)
+        self.check_safe_relpath(dockerfile)
         if dockerfile not in files:
             raise ValueError(
                 f"dockerfile {dockerfile!r} not present in files {sorted(files)}"
@@ -235,34 +214,6 @@ class BuilderAgent(BaseAgent):
 
         build_args = self._coerce_build_args(data.get("build_args"))
         return name, str(version), files, dockerfile, build_args
-
-    @staticmethod
-    def _check_safe_path(name: Any) -> None:
-        """Reject absolute paths and ``..`` traversal in a context-relative name."""
-        if not isinstance(name, str) or not name:
-            raise ValueError(f"invalid filename: {name!r}")
-        pure = PurePosixPath(name)
-        if pure.is_absolute() or ".." in pure.parts:
-            raise ValueError(f"unsafe filename (absolute or traversal): {name!r}")
-
-    @classmethod
-    def _coerce_content(cls, fname: Any, content: Any) -> bytes:
-        """Validate ``fname`` and decode ``content`` to bytes.
-
-        Accepts ``str`` (UTF-8 text — the common case for source/Dockerfiles) or a
-        ``{"encoding": "base64", "content": "..."}`` mapping for binary blobs.
-        """
-        cls._check_safe_path(fname)
-        if isinstance(content, str):
-            return content.encode("utf-8")
-        if isinstance(content, Mapping) and content.get("encoding") == "base64":
-            try:
-                return base64.b64decode(str(content.get("content", "")), validate=True)
-            except (ValueError, TypeError) as exc:
-                raise ValueError(f"invalid base64 content for {fname!r}") from exc
-        raise ValueError(
-            f"unsupported content for {fname!r}: expected str or base64 mapping"
-        )
 
     @staticmethod
     def _coerce_build_args(value: Any) -> dict[str, str]:
