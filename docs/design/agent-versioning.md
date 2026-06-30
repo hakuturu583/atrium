@@ -182,9 +182,11 @@ solely by fixed infrastructure and gated by supply-chain proof.
    successful build reply carries the immutable `digest` (`sha256:…`) plus the
    content-addressed `image_ref` (`<registry>/<name>@<digest>`) alongside the tag.
    Push is to `<slug>:<version>` only (BuilderAgent never moves `:active`).
-3. `next_version(current, level)` helper — ✅ implemented (semver bump). The
-   app-side `tags/list` collision guard (`RegistryClient.exists`) lands here; wiring
-   it into BuilderAgent's build path is — TODO.
+3. **`next_version` + collision guard** — ✅ implemented. `next_version(current, level)`
+   does the semver bump; the app-side guard is wired into BuilderAgent — when a
+   `registry_endpoint` is configured it `RegistryClient.exists(name, version)`-checks
+   before building and refuses to rebuild an existing version (best-effort: skipped
+   when no endpoint is set, fail-open if the registry is unreachable).
 4. **Registry client** — ✅ implemented in `atrium/core/registry.py`:
    `RegistryClient.versions(slug)` / `digest(slug, ref)` / `exists(slug, version)` /
    `active(slug)` / `set_active(slug, digest)` (Morpher-only re-tag), plus the
