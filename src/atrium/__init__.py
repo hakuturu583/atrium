@@ -24,7 +24,13 @@ from atrium.agents.builder_agent import BuilderAgent
 from atrium.agents.inference_agent import InferenceAgent
 from atrium.agents.tabby_llm_agent import TabbyAgentConfig, TabbyLLMAgent
 from atrium.core.base_agent import BaseAgent
-from atrium.core.registry import RegistryConfig, ensure_local_registry
+from atrium.core.registry import (
+    AgentRef,
+    RegistryClient,
+    RegistryConfig,
+    ensure_local_registry,
+    next_version,
+)
 from atrium.core.types import (
     ExecutionResult,
     GPURequest,
@@ -41,6 +47,9 @@ __all__ = [
     "BuilderAgent",
     "RegistryConfig",
     "ensure_local_registry",
+    "RegistryClient",
+    "AgentRef",
+    "next_version",
     "SandboxConfig",
     "NetworkMode",
     "GPURequest",
