@@ -1,9 +1,10 @@
 # Design: Agent Version Management & Generational Swap
 
-> Status: **DESIGN** — the *registry bootstrap* (below) is now implemented
-> (`atrium.core.registry`); the ledger client, version bump, factory and Morpher
-> remain design. Captures the mechanism by which a newly built agent generation
-> is versioned, recorded, validated and made live.
+> Status: **IMPLEMENTED** — the full lifecycle is in code: registry bootstrap +
+> client (`atrium.core.registry`), BuilderAgent digest + collision guard, the
+> agent factory (`atrium.core.factory`) and the Morpher (`atrium.core.morpher`).
+> Captures the mechanism by which a newly built agent generation is versioned,
+> recorded, validated and made live (see the per-piece status at the end).
 
 ## Problem
 Atrium agents are 1:1 with their sandbox and independently versioned
@@ -199,4 +200,11 @@ solely by fixed infrastructure and gated by supply-chain proof.
    `sandbox_config.image` to it, so `start_sandbox()` launches the live generation
    instead of the `__version__` default. A slug→class registry
    (`register_agent_type`) backs the by-slug form.
-6. Attestation verify + `set_active` + audit log, owned by a (future) Morpher. — TODO
+6. **Morpher** — ✅ implemented in `atrium/core/morpher.py`. `Morpher.promote/rollback`
+   gate the `:active` move on a passing `Attestation` (a validator's verdict over the
+   exact image digest, Ed25519-signed with the trust root) — it verifies the signature,
+   confirms the digest is really in the registry, calls `RegistryClient.set_active`, and
+   appends the decision (with its attestation) to a re-verifiable audit log. The Morpher
+   holds only the public trust-root key; `AttestationSigner` (the validator side) holds
+   the private key, so a compromised actor cannot forge a verdict. `generate_trust_root()`
+   mints the keypair. **All TODOs (#1–#6) are now implemented.**

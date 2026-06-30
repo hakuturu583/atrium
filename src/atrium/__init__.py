@@ -30,6 +30,12 @@ from atrium.core.factory import (
     register_agent_type,
     resolve_active_ref,
 )
+from atrium.core.morpher import (
+    Attestation,
+    AttestationSigner,
+    Morpher,
+    generate_trust_root,
+)
 from atrium.core.registry import (
     AgentRef,
     RegistryClient,
@@ -60,6 +66,10 @@ __all__ = [
     "create_agent_by_slug",
     "register_agent_type",
     "resolve_active_ref",
+    "Morpher",
+    "Attestation",
+    "AttestationSigner",
+    "generate_trust_root",
     "SandboxConfig",
     "NetworkMode",
     "GPURequest",
