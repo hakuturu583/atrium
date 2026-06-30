@@ -27,6 +27,7 @@ shows up stitched into the same Phoenix trace as the request.
 
 from __future__ import annotations
 
+import logging
 import re
 import shlex
 from typing import Any, Mapping, Optional
@@ -39,8 +40,11 @@ from atrium.agents.builder_agent.sandbox import (
 from atrium.core import telemetry as tel
 from atrium.core.base_agent import BaseAgent
 from atrium.core.errors import PolicyViolationError
+from atrium.core.registry import LocalRegistryError, RegistryClient, image_ref_from_tag
 from atrium.core.types import ExecutionResult, NetworkMode, SandboxConfig, VersionTag
 from atrium.protocol import Message, Role, data_part, text_message
+
+logger = logging.getLogger("atrium.agents.builder")
 
 __all__ = ["BuilderAgent"]
 
@@ -52,6 +56,8 @@ RESULT_TYPE = "build_result"
 
 #: Default Dockerfile name within the build context.
 DEFAULT_DOCKERFILE = "Dockerfile"
+#: Where Kaniko writes the pushed image's digest (sha256:…); /tmp is writable per policy.
+_DIGEST_FILE = "/tmp/atrium-build.digest"
 #: Default wall-clock cap for a single Kaniko build (seconds).
 DEFAULT_BUILD_TIMEOUT_S = 1800.0
 #: How much of the build log (chars) to echo back to the requester.
@@ -98,6 +104,7 @@ class BuilderAgent(BaseAgent):
         *,
         sandbox_config: Optional[SandboxConfig] = None,
         registry: str = DEFAULT_REGISTRY,
+        registry_endpoint: Optional[str] = None,
         build_timeout_s: float = DEFAULT_BUILD_TIMEOUT_S,
     ) -> None:
         from atrium.agents.builder_agent import __version__
@@ -107,6 +114,11 @@ class BuilderAgent(BaseAgent):
         super().__init__(agent_id, version, sandbox_config)
 
         self.registry = registry
+        # Host-side HTTP endpoint (host:port) to the registry, used only for the
+        # pre-build version-collision guard. It differs from ``registry`` (the
+        # in-sandbox push name); leave None to disable the guard (e.g. until the
+        # registry enforces tag immutability itself).
+        self.registry_endpoint = registry_endpoint
         self.build_timeout_s = build_timeout_s
         self._enforce_build_policy()
 
@@ -160,6 +172,16 @@ class BuilderAgent(BaseAgent):
             tag = self._image_tag(name, version)
             span.set_attribute("atrium.build.image", tag)
 
+            # Collision guard: generations are immutable, so refuse to rebuild a
+            # version that already exists. Skipped when no host-side registry
+            # endpoint is configured, and fail-open (proceed) if the registry is
+            # unreachable — it is a best-effort guard, not the source of truth.
+            if self._version_exists(name, version):
+                return self._error_message(
+                    message,
+                    f"version already exists: {tag} (generations are immutable — bump the version)",
+                )
+
             # Ensure the rootless build sandbox is up (idempotent).
             await self.start_sandbox()
 
@@ -176,10 +198,28 @@ class BuilderAgent(BaseAgent):
             span.set_attribute("atrium.exit_code", result.exit_code)
 
             if result.succeeded:
-                return self._success_message(message, tag, result)
+                digest = await self._read_digest()
+                if digest:
+                    span.set_attribute("atrium.build.digest", digest)
+                return self._success_message(message, tag, result, digest)
             return self._error_message(
                 message, f"kaniko build failed for {tag}", result=result
             )
+
+    def _version_exists(self, name: str, version: str) -> bool:
+        """Best-effort: whether ``name:version`` already exists in the registry.
+
+        Returns ``False`` (allow the build) when no ``registry_endpoint`` is
+        configured or the registry is unreachable — the guard only blocks on a
+        *confirmed* collision, never on its own inability to check.
+        """
+        if not self.registry_endpoint:
+            return False
+        try:
+            return RegistryClient(self.registry_endpoint).exists(name, version)
+        except LocalRegistryError as exc:
+            logger.warning("version-collision guard skipped (registry unreachable): %s", exc)
+            return False
 
     # ------------------------------------------------------------------ #
     # Request parsing / validation                                       #
@@ -250,6 +290,7 @@ class BuilderAgent(BaseAgent):
             f"--context=dir://{WORKSPACE}",
             f"--dockerfile={WORKSPACE}/{dockerfile}",
             f"--destination={self._image_tag(name, version)}",
+            f"--digest-file={_DIGEST_FILE}",  # capture the immutable sha256 of the push
             "--no-push=false",
             "--force",  # permit running outside kaniko's own scratch image
             "--cache=true",
@@ -260,6 +301,21 @@ class BuilderAgent(BaseAgent):
         ]
         argv += [f"--build-arg={key}={val}" for key, val in build_args.items()]
         return " ".join(shlex.quote(arg) for arg in argv)
+
+    async def _read_digest(self) -> Optional[str]:
+        """Return the ``sha256:…`` digest Kaniko wrote for the pushed image.
+
+        Best-effort: the build already succeeded, so a missing or malformed
+        digest file degrades to ``None`` rather than failing the build.
+        """
+        res = await self.execute_in_sandbox(f"cat {shlex.quote(_DIGEST_FILE)}")
+        digest = (res.stdout or "").strip()
+        if res.succeeded and digest.startswith("sha256:"):
+            return digest
+        # Not a build failure (Kaniko already pushed), but the image lands in the
+        # ledger without its immutable id — worth surfacing for operators.
+        logger.warning("could not read image digest after a successful build")
+        return None
 
     # ------------------------------------------------------------------ #
     # Reply assembly                                                     #
@@ -280,18 +336,24 @@ class BuilderAgent(BaseAgent):
             extra_parts=[data_part({"type": RESULT_TYPE, "status": status, **payload})],
         )
 
-    def _success_message(self, request: Message, tag: str, result: ExecutionResult) -> Message:
-        return self._reply(
-            request,
-            f"Build succeeded: {tag}",
-            STATUS_OK,
-            {
-                "image": tag,
-                "exit_code": result.exit_code,
-                "duration_s": result.duration_s,
-                "log_tail": (result.stdout or "")[-_LOG_TAIL:],
-            },
-        )
+    def _success_message(
+        self,
+        request: Message,
+        tag: str,
+        result: ExecutionResult,
+        digest: Optional[str] = None,
+    ) -> Message:
+        payload: dict[str, Any] = {
+            "image": tag,
+            "exit_code": result.exit_code,
+            "duration_s": result.duration_s,
+            "log_tail": (result.stdout or "")[-_LOG_TAIL:],
+        }
+        if digest:
+            payload["digest"] = digest
+            # Immutable, content-addressed pull reference for the ledger / factory.
+            payload["image_ref"] = image_ref_from_tag(tag, digest)
+        return self._reply(request, f"Build succeeded: {tag}", STATUS_OK, payload)
 
     def _error_message(
         self, request: Message, reason: str, *, result: Optional[ExecutionResult] = None
