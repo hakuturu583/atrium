@@ -56,7 +56,7 @@ prompt:
       content: "Read a file before editing it. Match the surrounding code style."
     memory:
       order: 70
-      content: ""                # filled at runtime (e.g. project notes); read_only: false
+      content: ""                # filled at runtime (e.g. project notes)
     environment:
       order: 80
       content: ""                # filled at runtime (cwd, git status, platform)

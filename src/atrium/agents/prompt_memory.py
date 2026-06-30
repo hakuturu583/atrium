@@ -1,28 +1,20 @@
 """Layered system-prompt construction for inference agents.
 
 An inference agent's system prompt is rarely one monolithic string: it is an
-*assembly of reusable, ordered sections* — an identity blurb, tone/format rules,
-tool-use guidance, the tool definitions themselves, project memory, environment
-context, the current objective, user overrides. This module lets an agent
-**record** those sections into a small in-memory registry as named *layers* and
-**compose** them into the final prompt, with the kept-layers and their order
-configurable (incl. from YAML).
+*assembly of reusable, ordered sections* — identity, tone/format rules, tool-use
+guidance, the tool definitions themselves, project memory, environment, the
+current objective, user overrides. This module lets an agent **record** those
+sections into a small registry as named *layers* and **compose** them into the
+final prompt, with the kept layers and their order configurable (incl. from YAML).
 
-Design lineage (verified prior art):
-
-* **Hermes** (`Hermes-Function-Calling`'s ``PromptManager``) — a YAML of ordered
-  named sections, each substituted over a context, with empty sections skipped.
-  Tool *definitions* live in their own section, separate from tool-use *prose*.
-* **Coding agents** (Roo Code) — the system prompt is an ordered list of
-  section-generator functions, each returning one string, concatenated.
-* **Letta/MemGPT memory blocks** — labelled, individually editable blocks
-  recompiled into the prompt each turn; the inspiration for ``read_only`` and the
-  "record into memory in layers" framing.
+Design lineage: ordered named sections that skip when empty (Hermes
+``PromptManager``); a system prompt assembled from ordered section generators
+(Roo Code); labelled blocks recompiled into the prompt each turn (Letta/MemGPT).
 
 The composed string is returned verbatim and handed to
 :meth:`~atrium.agents.inference_agent.InferenceAgent.build_system_prompt`, which
-the inference agents pass as the ``system`` message — so this is a pure host-side
-addition with no change to the A2A bridge or the wire format.
+the inference agents pass as the ``system`` message — a pure host-side addition
+with no change to the A2A bridge or the wire format.
 """
 
 from __future__ import annotations
@@ -71,9 +63,6 @@ class PromptLayer:
     render: Optional[RenderFn] = None
     """A callable producing the body from the compose context (highest priority).
     Not serializable to YAML; built in code (see :func:`tools_layer`)."""
-    read_only: bool = False
-    """Letta-inspired marker for policy/config layers that in-prompt memory tools
-    must not edit. Informational here (composition ignores it)."""
 
     def body(self, ctx: Mapping[str, Any]) -> str:
         """Resolve the layer's text: ``render`` > ``template`` > ``content``."""
@@ -196,7 +185,8 @@ class PromptMemory:
         layers: dict[str, PromptLayer] = {}
         for name, spec in (data.get("layers") or {}).items():
             spec = dict(spec or {})
-            is_tools = bool(spec.pop("tools", False)) or "mode" in spec
+            tools_flag = spec.pop("tools", False)
+            is_tools = tools_flag or "mode" in spec
             if is_tools:
                 layers[name] = tools_layer(name=name, **spec)
             else:
@@ -232,7 +222,6 @@ def tools_layer(
     order: int = 40,
     enabled: bool = True,
     title: Optional[str] = None,
-    read_only: bool = False,
     tag: str = "tools",
 ) -> PromptLayer:
     """Build the tool section as a dynamic layer reading ``ctx["tools"]``.
@@ -264,7 +253,6 @@ def tools_layer(
         enabled=enabled,
         title=title,
         render=_render,
-        read_only=read_only,
     )
 
 
@@ -296,7 +284,7 @@ def default_prompt_memory() -> PromptMemory:
     memory.record(tools_layer(order=40))  # json_schema by default
     memory.record(PromptLayer("capabilities", order=50))
     memory.record(PromptLayer("rules", order=60))
-    memory.record(PromptLayer("memory", order=70))  # editable (read_only=False)
+    memory.record(PromptLayer("memory", order=70))  # filled at runtime (project notes)
     memory.record(PromptLayer("environment", order=80))
     memory.record(PromptLayer("objective", order=90))
     memory.record(PromptLayer("user_instructions", order=100))
