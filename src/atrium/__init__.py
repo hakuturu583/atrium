@@ -24,6 +24,12 @@ from atrium.agents.builder_agent import BuilderAgent
 from atrium.agents.inference_agent import InferenceAgent
 from atrium.agents.tabby_llm_agent import TabbyAgentConfig, TabbyLLMAgent
 from atrium.core.base_agent import BaseAgent
+from atrium.core.factory import (
+    create_agent,
+    create_agent_by_slug,
+    register_agent_type,
+    resolve_active_ref,
+)
 from atrium.core.registry import (
     AgentRef,
     RegistryClient,
@@ -50,9 +56,18 @@ __all__ = [
     "RegistryClient",
     "AgentRef",
     "next_version",
+    "create_agent",
+    "create_agent_by_slug",
+    "register_agent_type",
+    "resolve_active_ref",
     "SandboxConfig",
     "NetworkMode",
     "GPURequest",
     "ExecutionResult",
     "VersionTag",
 ]
+
+# Register the built-in concrete agents so they can be launched from a bare slug
+# (create_agent_by_slug) once the registry has an active generation for them.
+register_agent_type(BuilderAgent)
+register_agent_type(TabbyLLMAgent)
