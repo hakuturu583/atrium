@@ -36,10 +36,22 @@ __all__ = [
     "ensure_local_registry",
     "registry_healthy",
     "stop_local_registry",
+    "image_ref_from_tag",
 ]
 
 #: Bind to /var/lib/registry inside the registry:2 container.
 _REGISTRY_DATA_DIR = "/var/lib/registry"
+
+
+def image_ref_from_tag(tag: str, digest: str) -> str:
+    """Turn a tag ref into the immutable, content-addressed ref pinned by the ledger.
+
+    ``<repo>:<version>`` + ``sha256:…`` → ``<repo>@<digest>`` (the repo is the tag
+    minus its rightmost ``:<version>``; a registry ``host:port`` prefix is kept).
+    Shared so BuilderAgent, the registry client and the agent factory all build
+    ``repo@digest`` references identically.
+    """
+    return f"{tag.rsplit(':', 1)[0]}@{digest}"
 
 
 class LocalRegistryError(AtriumError):

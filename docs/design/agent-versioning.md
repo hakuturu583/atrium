@@ -178,8 +178,10 @@ solely by fixed infrastructure and gated by supply-chain proof.
 ## Concrete pieces (status)
 1. **Registry bootstrap** — ✅ implemented (`atrium/core/registry.py`,
    `ensure_local_registry`): host-Docker brings up `registry:2` as fixed infra.
-2. BuilderAgent: `--digest-file` + return `digest`; push only `<slug>:<version>`
-   (self-contained, smallest win). — TODO
+2. **BuilderAgent digest** — ✅ implemented: Kaniko runs with `--digest-file`, and a
+   successful build reply carries the immutable `digest` (`sha256:…`) plus the
+   content-addressed `image_ref` (`<registry>/<name>@<digest>`) alongside the tag.
+   Push is to `<slug>:<version>` only (BuilderAgent never moves `:active`).
 3. `next_version(slug, level)` helper; app-side `tags/list` collision guard until
    registry tag-immutability is configured. — TODO
 4. Registry **client** in `atrium/core/registry.py` — `versions(slug)`,
