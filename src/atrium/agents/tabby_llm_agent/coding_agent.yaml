@@ -1,0 +1,35 @@
+# TabbyLLMAgent configuration — coding-agent preset for Ornith-1.0-35B (EXL3 4bpw)
+# on a 24 GB RTX 3090. Load with:
+#
+#   from atrium.agents.tabby_llm_agent.agent import TabbyLLMAgent
+#   agent = TabbyLLMAgent.from_yaml(".../coding_agent.yaml", "coder-1")
+#
+# Keys under `inference:` override the coding-agent defaults (coding_agent_settings);
+# omit any key to keep its tuned default. Unknown keys are rejected loudly.
+
+inference:
+  # --- per-generation sampling limits ---
+  max_output_tokens: 4096        # room for a whole file / multi-function patch in one turn
+  temperature: 0.2               # near-deterministic; right register for code & tool calls
+  top_p: 0.95
+  stop: []                       # e.g. ["</patch>"] to hard-stop on a sentinel
+
+  # --- context window / history compaction ---
+  context_window_tokens: 32768   # cheap KV cache here (10/40 full-attn layers, 2 KV heads)
+  compaction_enabled: true       # summarize old turns once the prompt nears the budget
+  compaction_trigger_ratio: 0.8  # compact at 80% of the usable input budget
+  compaction_keep_last_turns: 6  # keep the 6 most recent turns verbatim
+  compaction_summary_max_tokens: 1024
+  compaction_summary_temperature: 0.2
+
+  # --- reasoning-model handling (tags vary by model) ---
+  reasoning_open_tag: "<think>"   # set both empty ("") to disable stripping
+  reasoning_close_tag: "</think>"
+
+tabby:
+  # Host-side connection to the in-sandbox A2A bridge (no generation knobs here).
+  bridge_url: null               # null -> http://<agent_id>.local:<bridge_port>
+  bridge_port: 8730
+  model_name: Ornith-1.0-35B-EXL3-4.0bpw
+  max_retries: 60
+  retry_backoff_s: 2.0

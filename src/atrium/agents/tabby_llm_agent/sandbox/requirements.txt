@@ -1,0 +1,22 @@
+# Container-side dependencies for the TabbyLLMAgent sandbox image.
+#
+# These run INSIDE the OpenShell GPU container, NOT on the Atrium host. httpx
+# lives here (not in the host package) because only the in-sandbox bridge talks
+# to tabbyAPI over loopback HTTP.
+
+# A2A server + client (HTTP/ASGI server extras for the bridge) and OTel export.
+a2a-sdk[http-server,telemetry]>=1.1
+httpx>=0.27
+uvicorn[standard]>=0.30
+
+# Inference serving backend: tabbyAPI on exllamav3.
+# (exllamav3 ships CUDA extensions; install per its build instructions / wheels.)
+# tabbyAPI is typically vendored/cloned into the image rather than pip-installed;
+# see the Dockerfile. exllamav3 is listed here for completeness.
+# exllamav3
+
+# Tracing
+opentelemetry-api>=1.27
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-otlp>=1.27
+openinference-semantic-conventions>=0.1
