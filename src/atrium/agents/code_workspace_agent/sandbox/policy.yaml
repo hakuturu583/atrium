@@ -1,0 +1,42 @@
+# OpenShell network/permission policy for code-workspace sandboxes.
+#
+# Security envelope — deliberately DIFFERENT from the inference/builder agents.
+# Those are WAN-isolated; a code workspace cannot be, because its whole job is to
+# pull dependencies, fetch repos and **push code to GitHub via `gh`**, all of
+# which need public-internet egress. So egress is *allowed* here. The isolation
+# we keep instead is the rest of the envelope: a non-root user, no privilege
+# escalation, every Linux capability dropped, a read-only root filesystem with a
+# small set of explicit writable scratch areas, and (enforced in code, see
+# CodeWorkSpaceAgent._enforce_workspace_policy) no Docker socket and no GPU.
+#
+# This file is the package-internal source of truth for that envelope; it is
+# referenced via SandboxConfig.policy_path (see sandbox/config.py). Exact schema
+# may vary with the installed OpenShell version; pin/adjust as needed.
+version: 1
+
+network:
+  # A coding workspace needs the public internet (git push, gh, pip/uv, etc.).
+  default_egress: allow
+  allow:
+    - cidr: 127.0.0.0/8     # loopback
+    - cidr: 10.0.0.0/8      # host-local container LAN: control plane (A2A)
+    - cidr: 172.16.0.0/12   # docker/podman bridge ranges
+    - cidr: 0.0.0.0/0       # WAN: github.com + package registries (push/fetch)
+  # To tighten the WAN surface, flip default_egress to `deny` and enumerate only
+  # the GitHub / package-registry ranges your deployment needs under `allow`.
+
+filesystem:
+  # Read-only root; the agent only writes the explicit scratch areas below.
+  read_only_root: true
+  writable:
+    - /workspace          # the project tree (clone target, staged files, builds)
+    - /home/coder         # git/gh config, package-manager caches, venvs
+    - /tmp
+
+process:
+  # Unprivileged posture: no escalation, drop every Linux capability. Combined
+  # with the (code-enforced) absence of any docker.sock mount, the workspace can
+  # never reach the host Docker daemon or run --privileged.
+  no_new_privileges: true
+  drop_capabilities:
+    - ALL
