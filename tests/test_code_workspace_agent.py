@@ -100,6 +100,32 @@ def test_internal_network_stays_wan_isolated():
 
 
 # --------------------------------------------------------------------------- #
+# Credential forwarding (host env -> sandbox via OpenShell, by reference)      #
+# --------------------------------------------------------------------------- #
+def test_github_token_forwarded_by_reference_by_default():
+    cfg = build_sandbox_config("0.1.0")
+    # Forwarded by *name* (value resolved from the host at create time), so the
+    # token never lands in plain `env` / on the command line.
+    assert cfg.secret_env == {"GH_TOKEN": "GH_TOKEN", "GITHUB_TOKEN": "GITHUB_TOKEN"}
+    assert "GH_TOKEN" not in cfg.env and "GITHUB_TOKEN" not in cfg.env
+
+
+def test_forwarding_can_be_disabled_and_extended():
+    cfg = build_sandbox_config(
+        "0.1.0",
+        forward_github_token=False,
+        secret_env={"NPM_TOKEN": "MY_NPM_TOKEN"},
+    )
+    assert cfg.secret_env == {"NPM_TOKEN": "MY_NPM_TOKEN"}
+
+
+def test_literal_gh_token_still_uses_plain_env():
+    # By-value path: kept for tests/programmatic use (value goes through `env`).
+    cfg = build_sandbox_config("0.1.0", gh_token="literal", forward_github_token=False)
+    assert cfg.env["GH_TOKEN"] == "literal"
+
+
+# --------------------------------------------------------------------------- #
 # handle_task pipeline                                                        #
 # --------------------------------------------------------------------------- #
 def test_handle_task_runs_pipeline_in_order():

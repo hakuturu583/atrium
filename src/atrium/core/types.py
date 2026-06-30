@@ -92,6 +92,14 @@ class SandboxConfig:
     cpus: Optional[float] = None
     memory: Optional[str] = None
     env: dict[str, str] = field(default_factory=dict)
+    #: Credentials forwarded *by reference* from the host: ``{container_var:
+    #: host_var}``. At sandbox-create time each ``host_var`` is read from the
+    #: OpenShell process environment and exposed inside the sandbox as
+    #: ``container_var``. Unlike :attr:`env`, the secret value never appears on the
+    #: OpenShell command line (only the variable *name* is passed), so tokens are
+    #: not visible in ``ps``/process listings. Entries whose ``host_var`` is unset
+    #: on the host are silently skipped.
+    secret_env: dict[str, str] = field(default_factory=dict)
     volumes: dict[str, str] = field(default_factory=dict)
     workdir: str = "/workspace"
     policy_path: Optional[str] = None

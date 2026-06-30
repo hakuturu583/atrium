@@ -30,7 +30,7 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Mapping, Optional
 
 from atrium.core.errors import SandboxError
 from atrium.core.types import ExecutionResult, SandboxConfig
@@ -57,8 +57,32 @@ def _require_cli() -> str:
     return path
 
 
-async def _run(*args: str, timeout: Optional[float] = None) -> ExecutionResult:
-    """Run an ``openshell`` subcommand and capture its result."""
+def _resolve_secret_env(
+    secret_env: Mapping[str, str], environ: Mapping[str, str]
+) -> dict[str, str]:
+    """Resolve ``{container_var: host_var}`` against ``environ``.
+
+    Returns ``{container_var: value}`` for every mapping whose ``host_var`` is set
+    on the host; mappings with an unset ``host_var`` are skipped. Kept pure (no
+    process state) so it is unit-testable without the OpenShell CLI.
+    """
+    resolved: dict[str, str] = {}
+    for container_var, host_var in secret_env.items():
+        if host_var in environ:
+            resolved[container_var] = environ[host_var]
+    return resolved
+
+
+async def _run(
+    *args: str,
+    timeout: Optional[float] = None,
+    env: Optional[Mapping[str, str]] = None,
+) -> ExecutionResult:
+    """Run an ``openshell`` subcommand and capture its result.
+
+    ``env`` overrides the child process environment (used to hand secret values to
+    OpenShell out-of-band, so they never appear in ``args``/the command line).
+    """
     _require_cli()
     command = f"{OPENSHELL_BIN} {' '.join(shlex.quote(a) for a in args)}"
     start = time.monotonic()
@@ -68,6 +92,7 @@ async def _run(*args: str, timeout: Optional[float] = None) -> ExecutionResult:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=dict(env) if env is not None else None,
         )
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError as exc:
@@ -146,7 +171,21 @@ class Sandbox:
             for key, value in config.env.items():
                 args.extend(["--env", f"{key}={value}"])
 
-            result = await _run(*args)
+            # Credentials forwarded by reference: resolve the host values from this
+            # process's environment and pass each as a *name-only* `--env NAME`
+            # flag, so OpenShell reads the value from the child environment below
+            # rather than from the (process-visible) command line.
+            secrets = _resolve_secret_env(config.secret_env, os.environ)
+            for container_var in secrets:
+                args.extend(["--env", container_var])
+            child_env = {**os.environ, **secrets} if secrets else None
+            if secrets:
+                logger.debug(
+                    "forwarding %d secret env var(s) to sandbox %s: %s",
+                    len(secrets), name, sorted(secrets),  # names only, never values
+                )
+
+            result = await _run(*args, env=child_env)
             if not result.succeeded:
                 raise SandboxError(
                     f"openshell sandbox create failed for {name}: {result.stderr.strip()}"

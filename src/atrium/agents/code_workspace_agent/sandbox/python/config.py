@@ -30,10 +30,13 @@ def build_sandbox_config(
     cpus: Optional[float] = 4.0,
     env: Optional[Mapping[str, str]] = None,
     gh_token: Optional[str] = None,
+    forward_github_token: bool = True,
+    secret_env: Optional[Mapping[str, str]] = None,
 ) -> SandboxConfig:
     """Build the Python-workspace SandboxConfig for ``version`` of this agent.
 
-    Same envelope as the base workspace (see the base
+    Same envelope (and the same credential-forwarding knobs — ``gh_token`` /
+    ``forward_github_token`` / ``secret_env``) as the base workspace (see the base
     :func:`~atrium.agents.code_workspace_agent.sandbox.config.build_sandbox_config`)
     but pinned to the Python image and with a slightly larger resource default
     (compiling native wheels and running test suites is heavier).
@@ -46,5 +49,7 @@ def build_sandbox_config(
         cpus=cpus,
         env=env,
         gh_token=gh_token,
+        forward_github_token=forward_github_token,
+        secret_env=secret_env,
         agent_slug="python_code_workspace_agent",
     )

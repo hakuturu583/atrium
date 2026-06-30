@@ -26,6 +26,7 @@ __all__ = [
     "WORKSPACE",
     "BASE_IMAGE_REPOSITORY",
     "DEFAULT_TOKEN_ENV",
+    "GITHUB_TOKEN_ENV_VARS",
     "POLICY_PATH",
 ]
 
@@ -37,6 +38,11 @@ BASE_IMAGE_REPOSITORY = "local-registry/codeworkspace_base"
 
 #: Default name of the env var carrying the GitHub token used by ``gh``/``git``.
 DEFAULT_TOKEN_ENV = "GH_TOKEN"
+
+#: Host env vars that may carry a GitHub token, in the order ``gh`` itself reads
+#: them. When credential forwarding is on, any of these present on the host is
+#: forwarded into the sandbox under the same name.
+GITHUB_TOKEN_ENV_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
 
 #: The OpenShell egress/permission policy shipped alongside this config.
 POLICY_PATH = os.path.join(os.path.dirname(__file__), "policy.yaml")
@@ -52,6 +58,8 @@ def build_sandbox_config(
     env: Optional[Mapping[str, str]] = None,
     gh_token: Optional[str] = None,
     token_env: str = DEFAULT_TOKEN_ENV,
+    forward_github_token: bool = True,
+    secret_env: Optional[Mapping[str, str]] = None,
     agent_slug: str = "codeworkspace_base",
 ) -> SandboxConfig:
     """Build the code-workspace SandboxConfig for ``version`` of ``repository``.
@@ -67,20 +75,37 @@ def build_sandbox_config(
     * pinned to the shipped ``policy.yaml`` (read-only root, no_new_privileges,
       drop ALL caps) — the non-egress half of the isolation.
 
+    Credentials reach the sandbox in one of two ways:
+
+    * **By reference (preferred).** ``forward_github_token`` (default) forwards any
+      of :data:`GITHUB_TOKEN_ENV_VARS` present in the *host* environment into the
+      sandbox under the same name, and ``secret_env`` (``{container_var:
+      host_var}``) forwards arbitrary extra credentials. These travel through the
+      OpenShell process environment at create time, so the value never appears on
+      the command line / in ``ps`` (see :attr:`SandboxConfig.secret_env`).
+    * **By value.** ``gh_token`` injects a literal token as plain ``env`` — handy
+      for tests/programmatic use, but the value *is* passed on the OpenShell CLI;
+      prefer the by-reference path for real secrets.
+
     Parameters
     ----------
     repository:
         Image repository (``<repository>:<version>``). Derived language images
         (e.g. ``local-registry/python_code_workspace_agent``) pass their own.
-    gh_token:
-        Optional GitHub token; when given it is injected into the sandbox as
-        ``token_env`` so ``gh``/``git`` can authenticate for clone/push.
     """
     sandbox_env: dict[str, str] = {"ATRIUM_WORKSPACE": WORKSPACE}
     if env:
         sandbox_env.update(env)
     if gh_token:
         sandbox_env[token_env] = gh_token
+
+    forwarded: dict[str, str] = {}
+    if forward_github_token:
+        # Forward each well-known GitHub token var under its own name; resolution
+        # at create time silently skips any that are unset on the host.
+        forwarded.update({var: var for var in GITHUB_TOKEN_ENV_VARS})
+    if secret_env:
+        forwarded.update(secret_env)
 
     return SandboxConfig(
         image=f"{repository}:{version}",
@@ -91,6 +116,7 @@ def build_sandbox_config(
         cpus=cpus,
         memory=memory,
         env=sandbox_env,
+        secret_env=forwarded,
         workdir=WORKSPACE,
         policy_path=POLICY_PATH if os.path.exists(POLICY_PATH) else None,
         labels={"atrium.agent": agent_slug, "atrium.version": str(version)},
