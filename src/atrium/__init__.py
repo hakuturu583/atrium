@@ -23,6 +23,12 @@ from __future__ import annotations
 from atrium.agents.builder_agent import BuilderAgent
 from atrium.agents.inference_agent import InferenceAgent
 from atrium.agents.tabby_llm_agent import TabbyAgentConfig, TabbyLLMAgent
+from atrium.agents.task_agent import (
+    BuildOutcome,
+    GenerationRequest,
+    SlackTaskAgent,
+    TaskAgent,
+)
 from atrium.core.base_agent import BaseAgent
 from atrium.core.factory import (
     create_agent,
@@ -57,6 +63,10 @@ __all__ = [
     "TabbyLLMAgent",
     "TabbyAgentConfig",
     "BuilderAgent",
+    "TaskAgent",
+    "SlackTaskAgent",
+    "GenerationRequest",
+    "BuildOutcome",
     "RegistryConfig",
     "ensure_local_registry",
     "RegistryClient",
@@ -81,3 +91,4 @@ __all__ = [
 # (create_agent_by_slug) once the registry has an active generation for them.
 register_agent_type(BuilderAgent)
 register_agent_type(TabbyLLMAgent)
+register_agent_type(SlackTaskAgent)
