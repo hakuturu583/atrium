@@ -13,6 +13,7 @@ import asyncio
 
 import pytest
 
+from atrium.orchestration.bootstrap import BootstrapConfig
 from atrium.orchestration import (
     BoardUpdate,
     CancellableAgentExecutor,
@@ -78,6 +79,13 @@ def test_validate_rejects_a_cycle():
 def test_workboard_dict_roundtrip():
     wb = _wb(_node("a"), _node("b", ["a"]))
     assert Workboard.from_dict(wb.to_dict()).to_dict() == wb.to_dict()
+
+
+def test_bootstrap_config_derives_endpoints():
+    cfg = BootstrapConfig()
+    assert cfg.prefect_api_url == "http://127.0.0.1:4200/api"
+    assert cfg.prefect_health_url == "http://127.0.0.1:4200/api/health"
+    assert cfg.otlp_endpoint == "http://127.0.0.1:6006/v1/traces"
 
 
 def test_single_builds_a_valid_one_node_job():

@@ -18,6 +18,9 @@ dependencies = [
     # Prefect is the job-execution entry point: every job runs as a workboard
     # (a task-dependency DAG) on Prefect, so it is a core dependency, not optional.
     "prefect>=3.0",
+    # Drives docker-compose from Python to auto-start the dependency services
+    # (Prefect server + Postgres + Phoenix) — see atrium.orchestration.bootstrap.
+    "python-on-whales>=0.71",
     "semver>=3.0.4",
 ]
 
