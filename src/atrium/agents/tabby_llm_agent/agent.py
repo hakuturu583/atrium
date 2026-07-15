@@ -25,7 +25,8 @@ from typing import Any, Optional
 
 from atrium.agents.inference_agent import InferenceAgent, InferenceSettings
 from atrium.agents.prompt_memory import PromptLayer, PromptMemory, default_prompt_memory
-from atrium.core.errors import ModelNotReadyError
+from atrium.agents.tabby_llm_agent.cache import KVCacheConfig
+from atrium.core.errors import ModelNotReadyError, PolicyViolationError
 from atrium.core.types import SandboxConfig, VersionTag
 from atrium.protocol import (
     Message,
@@ -207,10 +208,13 @@ class TabbyLLMAgent(InferenceAgent):
         # Default to coding-agent-tuned settings *and* the coding-agent layered
         # system prompt for this machine/model; callers can pass their own
         # ``settings=`` / ``prompt_memory=`` or load them from YAML (from_yaml).
+        # A client (see ``connect``) shares another agent's backend and never
+        # starts a sandbox, so it legitimately needs no GPU of its own.
         super().__init__(
             agent_id,
             version,
             sandbox_config,
+            require_gpu=not self.config.bridge_url,
             settings=settings or coding_agent_settings(),
             prompt_memory=prompt_memory or coding_agent_prompt_memory(),
         )
@@ -256,10 +260,68 @@ class TabbyLLMAgent(InferenceAgent):
             prompt_memory=prompt_memory,
         )
 
+    @classmethod
+    def connect(
+        cls,
+        agent_id: str,
+        bridge_url: str,
+        *,
+        model_name: Optional[str] = None,
+        version: "str | VersionTag | None" = None,
+        settings: Optional[InferenceSettings] = None,
+        prompt_memory: Optional[PromptMemory] = None,
+    ) -> "TabbyLLMAgent":
+        """Build a *client-mode* agent that shares an already-loaded backend.
+
+        The returned agent owns no sandbox and loads no model: ``start_sandbox``
+        is a no-op and inference is sent over A2A to ``bridge_url`` (another
+        agent's :meth:`bridge_url`). This is how several agents — coder,
+        reviewer, tester — fan into one GPU-resident model, which tabbyAPI serves
+        concurrently via continuous batching. The weights are paid for once; each
+        extra client costs only its slice of the shared KV cache.
+
+        Pass ``model_name`` when the backend has more than one model available so
+        requests target the right one; otherwise the backend's loaded model is
+        used. ``settings`` / ``prompt_memory`` default to the coding-agent preset,
+        exactly as for a backend-owning agent.
+        """
+        config = TabbyAgentConfig(bridge_url=bridge_url, model_name=model_name)
+        return cls(
+            agent_id,
+            version,
+            config=config,
+            settings=settings,
+            prompt_memory=prompt_memory,
+        )
+
+    @property
+    def is_client(self) -> bool:
+        """True when this agent shares another's backend instead of owning one.
+
+        Set implicitly by a configured ``bridge_url`` (see :meth:`connect`). A
+        client never starts a sandbox and must not load or unload the shared
+        model — those stay the backend owner's responsibility.
+        """
+        return bool(self.config.bridge_url)
+
+    def bridge_url(self) -> str:
+        """The A2A base URL other agents pass to :meth:`connect` to share this
+        agent's backend. For a client, this is just the backend it points at."""
+        return self._bridge_target()
+
     # ------------------------------------------------------------------ #
     # Sandbox lifecycle: bring up tabbyAPI + bridge, then resolve the card #
     # ------------------------------------------------------------------ #
     async def start_sandbox(self) -> None:
+        # Client-mode agents share a backend they don't own: no sandbox, no GPU,
+        # no backend launch — just talk to the shared bridge over A2A.
+        if self.is_client:
+            logger.debug(
+                "%s in client mode; sharing backend at %s (no sandbox started)",
+                self.agent_id,
+                self.config.bridge_url,
+            )
+            return
         await super().start_sandbox()
         await self._launch_backend()
 
@@ -314,18 +376,50 @@ class TabbyLLMAgent(InferenceAgent):
             await asyncio.sleep(self.config.retry_backoff_s)
             waited += self.config.retry_backoff_s
 
-    async def load_model(self, model_name: Optional[str] = None, **options: Any) -> None:
-        """Tell the bridge to load ``model_name`` once quantization is complete."""
+    async def load_model(
+        self,
+        model_name: Optional[str] = None,
+        *,
+        cache: Optional[KVCacheConfig] = None,
+        **options: Any,
+    ) -> None:
+        """Tell the bridge to load ``model_name`` once quantization is complete.
+
+        ``cache`` tunes the shared KV cache (quantization mode, pool size, batch
+        cap) — size it with :class:`~atrium.agents.tabby_llm_agent.cache.KVCacheConfig`
+        for the number of client agents you intend to fan in. Explicit
+        ``**options`` win over ``cache`` on key clashes. Loading is a
+        backend-owner operation; a client-mode agent must not call it.
+        """
+        self._require_backend_owner("load_model")
         payload: dict[str, Any] = {"model_name": model_name or self.config.model_name}
+        if cache is not None:
+            payload.update(cache.load_options())
         payload.update(options)
         await self._control(KIND_LOAD, payload)
         if model_name:
             self.config.model_name = model_name
 
     async def unload_model(self) -> None:
-        """Tell the bridge to unload the current model."""
+        """Tell the bridge to unload the current model (backend owner only)."""
+        self._require_backend_owner("unload_model")
         await self._control(KIND_UNLOAD)
         self._model_ready = False
+
+    def _require_backend_owner(self, op: str) -> None:
+        """Refuse a model-mutating op on a client that shares someone's backend.
+
+        A client's ``load``/``unload`` would swap the model out from under every
+        other agent fanned into the same backend — an isolation invariant, so it
+        raises :class:`PolicyViolationError`. Read-only readiness checks stay open
+        to clients (they legitimately wait for the shared model to come up).
+        """
+        if self.is_client:
+            raise PolicyViolationError(
+                f"{op} is a backend-owner operation; {self.agent_id} is a client "
+                f"sharing the model at {self.config.bridge_url} and must not "
+                f"mutate it (loading/unloading affects every fanned-in agent)"
+            )
 
     async def _control(self, kind: str, payload: Optional[dict[str, Any]] = None) -> Message:
         message = text_message(

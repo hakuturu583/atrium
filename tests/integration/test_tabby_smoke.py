@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 import pytest
 
@@ -59,3 +60,52 @@ def test_infer_returns_text():
 
     out = asyncio.run(scenario())
     assert isinstance(out, str) and out.strip()
+
+
+def test_parallel_infer_fans_into_one_backend():
+    """Several client agents share one bridge/backend and infer concurrently.
+
+    Exercises the shared-backend path on real hardware: N ``connect()`` clients
+    fan into the one already-serving bridge and run in parallel via tabbyAPI's
+    continuous batching. Asserts every client gets a real completion, and that
+    concurrent wall-clock beats running the same requests sequentially (the
+    batching win). Set ``ATRIUM_IT_PARALLEL`` to change the fleet size.
+    """
+    env = require_env("ATRIUM_IT_BRIDGE_URL")
+    bridge_url = env["ATRIUM_IT_BRIDGE_URL"]
+    model_name = os.environ.get("ATRIUM_IT_MODEL")
+    timeout = float(os.environ.get("ATRIUM_IT_READY_TIMEOUT", "300"))
+    n = int(os.environ.get("ATRIUM_IT_PARALLEL", "4"))
+
+    clients = [
+        TabbyLLMAgent.connect(f"it-tabby-{i}", bridge_url, model_name=model_name)
+        for i in range(n)
+    ]
+    prompts = [f"Reply with the single word: number{i}" for i in range(n)]
+
+    async def ask(agent: TabbyLLMAgent, prompt: str) -> str:
+        return await agent.infer(prompt, max_tokens=16, temperature=0.0)
+
+    async def scenario() -> tuple[list[str], float, float]:
+        await clients[0].wait_until_ready(timeout=timeout)
+
+        t0 = time.perf_counter()
+        for agent, prompt in zip(clients, prompts):
+            await ask(agent, prompt)
+        seq_wall = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
+        outs = await asyncio.gather(
+            *(ask(agent, prompt) for agent, prompt in zip(clients, prompts))
+        )
+        conc_wall = time.perf_counter() - t0
+        return outs, seq_wall, conc_wall
+
+    outs, seq_wall, conc_wall = asyncio.run(scenario())
+
+    assert all(c.is_client for c in clients)
+    assert len(outs) == n
+    assert all(isinstance(o, str) and o.strip() for o in outs)
+    # Sharing one batched backend, concurrent beats sequential (allow slack for
+    # short prompts / scheduler warmup).
+    assert conc_wall < seq_wall
