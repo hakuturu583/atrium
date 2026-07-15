@@ -37,9 +37,10 @@ class SandboxNotRunningError(SandboxError):
 class PolicyViolationError(AgentError):
     """Raised when a security/isolation invariant would be violated.
 
-    Used by :class:`~atrium.agents.inference_agent.InferenceAgent` to refuse a
-    configuration that would expose GPU-bearing inference containers to the WAN
-    or run them without the required GPU passthrough.
+    Raised by an agent's construction-time policy check to refuse a
+    configuration that would break its isolation envelope — e.g. exposing a
+    GPU-bearing inference container to the WAN, or mounting the host Docker
+    socket into a code workspace.
     """
 
 
