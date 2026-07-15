@@ -11,6 +11,7 @@ from atrium.core.errors import (
     SandboxError,
     SandboxNotRunningError,
 )
+from atrium.core.telemetry import configure_tracing, shutdown_tracing
 from atrium.core.types import (
     ExecutionResult,
     GPURequest,
@@ -36,4 +37,6 @@ __all__ = [
     "PolicyViolationError",
     "A2ATransportError",
     "ModelNotReadyError",
+    "configure_tracing",
+    "shutdown_tracing",
 ]

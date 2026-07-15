@@ -120,6 +120,9 @@ class BaseAgent(abc.ABC):
             return
 
         image = self.sandbox_config.image or self.image_name
+        # Forward the host's OTLP settings so the in-container bridge ships its
+        # spans to the same Phoenix; the trace then spans both processes.
+        tel.apply_sandbox_env(self.sandbox_config.env)
         attributes = {
             "atrium.agent_id": self.agent_id,
             "atrium.image": image,

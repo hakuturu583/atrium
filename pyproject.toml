@@ -14,6 +14,7 @@ dependencies = [
     "openinference-semantic-conventions>=0.1.30",
     "opentelemetry-api>=1.43.0",
     "opentelemetry-sdk>=1.43.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.43.0",
     "semver>=3.0.4",
 ]
 
