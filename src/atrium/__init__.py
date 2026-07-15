@@ -4,12 +4,12 @@ Public surface:
 
 * :class:`~atrium.core.base_agent.BaseAgent` — abstract base equipping agents
   with OpenShell sandbox lifecycle, A2A communication and OpenInference tracing.
-* :class:`~atrium.agents.inference_agent.InferenceAgent` — WAN-isolated, GPU-only
-  inference base.
-* :class:`~atrium.agents.tabby_llm_agent.TabbyLLMAgent` — concrete inference
-  agent backed by tabbyAPI / exllamav3, spoken to exclusively over A2A.
 * :class:`~atrium.agents.builder_agent.BuilderAgent` — fixed-infrastructure agent
   that builds agent images with rootless Kaniko (no host Docker daemon).
+* :class:`~atrium.agents.task_agent.TaskAgent` — the self-evolution driver.
+
+The *evolvable* worker agents (e.g. the tabby LLM inference agent) live in the
+separate ``atrium_agents`` distribution, which depends on this package.
 * :func:`~atrium.core.registry.ensure_local_registry` — fixed-infrastructure
   bootstrap that brings up the local container registry (the generation ledger)
   via the host Docker daemon, for the trusted main process only.
@@ -21,8 +21,6 @@ package never imports ``httpx`` (that lives in the agent container images).
 from __future__ import annotations
 
 from atrium.agents.builder_agent import BuilderAgent
-from atrium.agents.inference_agent import InferenceAgent
-from atrium.agents.tabby_llm_agent import TabbyAgentConfig, TabbyLLMAgent
 from atrium.agents.task_agent import (
     BuildOutcome,
     GenerationRequest,
@@ -59,9 +57,6 @@ from atrium.core.types import (
 
 __all__ = [
     "BaseAgent",
-    "InferenceAgent",
-    "TabbyLLMAgent",
-    "TabbyAgentConfig",
     "BuilderAgent",
     "TaskAgent",
     "SlackTaskAgent",
@@ -87,8 +82,8 @@ __all__ = [
     "VersionTag",
 ]
 
-# Register the built-in concrete agents so they can be launched from a bare slug
-# (create_agent_by_slug) once the registry has an active generation for them.
+# Register the fixed built-in agents so they can be launched from a bare slug
+# (create_agent_by_slug) once the registry has an active generation for them. The
+# evolvable agents register themselves from the `atrium_agents` package.
 register_agent_type(BuilderAgent)
-register_agent_type(TabbyLLMAgent)
 register_agent_type(SlackTaskAgent)
