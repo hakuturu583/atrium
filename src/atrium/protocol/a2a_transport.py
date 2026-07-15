@@ -8,6 +8,7 @@ the container image where the in-sandbox bridge actually serves A2A.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Optional, Union
 
@@ -23,7 +24,7 @@ MessageHandler = Callable[[Message], Awaitable[Message]]
 # A send target is either a base URL or a resolved AgentCard.
 SendTarget = Union[str, AgentCard]
 
-__all__ = ["send_message", "AtriumAgentExecutor", "build_request_handler"]
+__all__ = ["send_message", "cancel_task", "AtriumAgentExecutor", "build_request_handler"]
 
 
 async def send_message(target: SendTarget, message: Message) -> Message:
@@ -70,6 +71,47 @@ async def send_message(target: SendTarget, message: Message) -> Message:
                 await client.close()
             except Exception:  # pragma: no cover - best-effort cleanup
                 logger.debug("A2A client close failed", exc_info=True)
+
+
+async def cancel_task(target: SendTarget, task_id: str) -> bool:
+    """Best-effort A2A cancel of ``task_id`` at ``target``. Never raises.
+
+    The cancel counterpart to :func:`send_message`, kept here so the A2A client
+    lifecycle (create / invoke / close) lives in one place. Cancellation is a soft
+    control signal: the SDK client's cancel entry point is resolved dynamically
+    (``cancel_task`` / ``cancel``) and every failure degrades to a logged no-op
+    rather than propagating, so a caller unwinding a cancel is never broken by it.
+    Returns ``True`` only when a cancel was actually dispatched.
+    """
+    if not task_id:
+        return False
+
+    # Imported lazily so importing this module never requires the client extras.
+    from a2a.client import create_client
+
+    with tel.start_span("a2a.cancel_task", kind=tel.CHAIN, attributes={"a2a.task_id": task_id}):
+        try:
+            client = await create_client(target)
+        except Exception:  # noqa: BLE001 - control signal must never break the caller
+            logger.debug("cancel: could not create client for %r", target, exc_info=True)
+            return False
+        try:
+            canceller = getattr(client, "cancel_task", None) or getattr(client, "cancel", None)
+            if canceller is None:
+                logger.debug("cancel: client exposes no cancel method")
+                return False
+            result = canceller(task_id)
+            if asyncio.iscoroutine(result):
+                await result
+            return True
+        except Exception:  # noqa: BLE001
+            logger.debug("cancel for task %s failed", task_id, exc_info=True)
+            return False
+        finally:
+            try:
+                await client.close()
+            except Exception:  # pragma: no cover - best-effort cleanup
+                logger.debug("cancel: client close failed", exc_info=True)
 
 
 class AtriumAgentExecutor:
