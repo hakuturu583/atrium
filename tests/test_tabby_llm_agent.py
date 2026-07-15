@@ -392,3 +392,56 @@ def test_bridge_json_schema_tool_mode_sets_response_format():
     }
     req = _build_chat_request(payload, TabbyConfig(tool_mode="json_schema"))
     assert req["response_format"] == {"type": "json_object"}
+
+
+# --------------------------------------------------------------------------- #
+# Bridge A2A surface: the socket path an a2a-sdk client actually walks.         #
+# Regression coverage for issue #22 (card 404 + message/stream unregistered).   #
+# --------------------------------------------------------------------------- #
+def _bridge_test_client():
+    pytest.importorskip("httpx")
+    pytest.importorskip("starlette")
+    pytest.importorskip("a2a.server.routes")
+    from starlette.testclient import TestClient
+
+    from atrium.agents.tabby_llm_agent.bridge.server import TabbyConfig, build_bridge_app
+
+    return TestClient(build_bridge_app(TabbyConfig(version="9.9.9")))
+
+
+def test_bridge_serves_well_known_agent_card():
+    # Gap 1: create_client(url) resolves /.well-known/agent-card.json first; a
+    # bare create_jsonrpc_routes mount 404s here and the client can't connect.
+    client = _bridge_test_client()
+    resp = client.get("/.well-known/agent-card.json")
+    assert resp.status_code == 200
+    card = resp.json()
+    assert card["name"] == "tabby_llm_agent"
+    assert card["version"] == "9.9.9"
+
+
+def test_bridge_accepts_v0_3_message_methods():
+    # Gap 2: the card advertises streaming, so a client may pick the v0.3
+    # JSON-RPC names (message/send, message/stream). With v0.3 compat enabled the
+    # bridge routes them instead of rejecting with -32601 (Method not found).
+    client = _bridge_test_client()
+    for method in ("message/send", "message/stream"):
+        body = {
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": method,
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "data", "data": {"type": "ready?"}}],
+                    "messageId": "m1",
+                    "kind": "message",
+                }
+            },
+        }
+        resp = client.post("/", json=body)
+        # The method must be recognized — a routed request never returns -32601.
+        # (tabby itself is absent in this unit test, so a downstream error is
+        # fine; we only assert the method was found and dispatched.)
+        error = resp.json().get("error") if "json" in resp.headers.get("content-type", "") else None
+        assert not (error and error.get("code") == -32601), f"{method} not routed: {error}"

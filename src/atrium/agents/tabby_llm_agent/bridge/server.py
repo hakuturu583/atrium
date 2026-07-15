@@ -271,9 +271,22 @@ def _safe_json(value: Any) -> str:
 # ASGI app + entrypoint (container-side only)                                  #
 # --------------------------------------------------------------------------- #
 def build_bridge_app(config: Optional[TabbyConfig] = None):
-    """Build the Starlette ASGI app serving this bridge's A2A endpoint."""
+    """Build the Starlette ASGI app serving this bridge's A2A endpoint.
+
+    The app mounts two things a stock a2a-sdk client needs to reach the bridge:
+
+    * the **well-known agent card** at ``/.well-known/agent-card.json`` — the
+      client resolves this first (``create_client(url)``) and 404s without it; and
+    * the **JSON-RPC routes with v0.3 compatibility enabled**, so the endpoint
+      accepts *both* the gRPC-style method names (``SendMessage`` /
+      ``SendStreamingMessage``) and the A2A v0.3 JSON-RPC names (``message/send``
+      / ``message/stream``). A host client on a slightly different a2a-sdk build
+      than the container image can pick either scheme; registering both keeps the
+      socket reachable across that version skew instead of failing with
+      ``-32601 Method not found``.
+    """
     from a2a.server.request_handlers import DefaultRequestHandler
-    from a2a.server.routes import create_jsonrpc_routes
+    from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
     from a2a.server.tasks import InMemoryTaskStore
     from starlette.applications import Starlette
 
@@ -284,7 +297,9 @@ def build_bridge_app(config: Optional[TabbyConfig] = None):
         task_store=InMemoryTaskStore(),
         agent_card=card,
     )
-    routes = create_jsonrpc_routes(handler, "/")
+    routes = create_agent_card_routes(card) + create_jsonrpc_routes(
+        handler, "/", enable_v0_3_compat=True
+    )
     return Starlette(routes=routes)
 
 

@@ -5,7 +5,10 @@
 # to tabbyAPI over loopback HTTP.
 
 # A2A server + client (HTTP/ASGI server extras for the bridge) and OTel export.
-a2a-sdk[http-server,telemetry]>=1.1
+# Pinned to the same 1.x major the host resolves (see pyproject/uv.lock) so the
+# in-container bridge and the host-side client don't drift onto incompatible
+# JSON-RPC method-name schemes; the bridge additionally enables v0.3 compat.
+a2a-sdk[http-server,telemetry]>=1.1,<2
 httpx>=0.27
 uvicorn[standard]>=0.30
 
