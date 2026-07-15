@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from contextlib import contextmanager
 from typing import Any, Iterator, Mapping, MutableMapping, Optional
 
@@ -67,11 +68,38 @@ except Exception:  # pragma: no cover
 
 _TRACER_NAME = "atrium"
 
+#: The standard OTLP endpoint env vars the exporter reads natively; shared by
+#: opt-in detection and sandbox forwarding below (single source of truth).
+_OTLP_ENDPOINT_VARS = (
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+)
+#: Env vars whose presence opts tracing in by default (an endpoint is configured).
+_ENDPOINT_ENV_VARS = (*_OTLP_ENDPOINT_VARS, "PHOENIX_COLLECTOR_ENDPOINT")
+#: OTLP env vars forwarded from the host into a sandbox (see :func:`apply_sandbox_env`)
+#: so the in-container exporter ships to the same backend and its spans stitch into
+#: the host trace. ``OTEL_SERVICE_NAME`` is omitted — each container sets its own;
+#: ``PHOENIX_COLLECTOR_ENDPOINT`` is omitted — the OTLP exporter does not read it.
+_FORWARD_ENV_VARS = (
+    *_OTLP_ENDPOINT_VARS,
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_RESOURCE_ATTRIBUTES",
+)
+#: Default OTLP/HTTP traces endpoint (Phoenix serves UI + OTLP on :6006).
+_DEFAULT_OTLP_TRACES_ENDPOINT = "http://localhost:6006/v1/traces"
+
+# Set by configure_tracing(); _CONFIGURED guards against double-initialisation.
+_CONFIGURED = False
+_PROVIDER: Any = None
+
 __all__ = [
     "get_tracer",
     "start_span",
+    "configure_tracing",
+    "shutdown_tracing",
     "inject_traceparent",
     "extract_context",
+    "apply_sandbox_env",
     "SPAN_KIND",
     "INPUT_VALUE",
     "OUTPUT_VALUE",
@@ -103,6 +131,98 @@ def get_tracer(name: str = _TRACER_NAME):
     if _OTEL:
         return trace.get_tracer(name)
     return None
+
+
+# --------------------------------------------------------------------------- #
+# Bootstrap: install a real exporter so spans actually reach Phoenix           #
+# --------------------------------------------------------------------------- #
+def _tracing_enabled(enabled: Optional[bool]) -> bool:
+    """Resolve whether to install an exporter.
+
+    ``enabled`` (when not ``None``) wins. Otherwise tracing is opt-in: it turns
+    on only when an OTLP endpoint env var is present. ``ATRIUM_TRACING_DISABLED``
+    is an explicit kill switch that overrides everything (so tests/CI stay
+    silent and never open an exporter connection).
+    """
+    if os.environ.get("ATRIUM_TRACING_DISABLED", "").lower() in ("1", "true", "yes"):
+        return False
+    if enabled is not None:
+        return enabled
+    return any(os.environ.get(var) for var in _ENDPOINT_ENV_VARS)
+
+
+def configure_tracing(
+    service_name: str = _TRACER_NAME,
+    *,
+    resource_attributes: Optional[Mapping[str, Any]] = None,
+    enabled: Optional[bool] = None,
+) -> bool:
+    """Install a ``TracerProvider`` exporting spans over OTLP/HTTP.
+
+    Call this once per process at startup (entrypoints / launchers) so the spans
+    created throughout the runtime are actually shipped to Phoenix instead of
+    being dropped by OpenTelemetry's default no-op provider.
+
+    Vendor-neutral: the exporter speaks plain OTLP/HTTP and resolves its endpoint
+    from the standard ``OTEL_EXPORTER_OTLP*`` env vars (falling back to Phoenix's
+    ``http://localhost:6006/v1/traces``), so Phoenix is just one possible backend.
+
+    Idempotent and defensive: a no-op when OTel is unavailable, when tracing is
+    disabled (see :func:`_tracing_enabled`), or when already configured. Returns
+    ``True`` only when an exporter was installed.
+    """
+    global _CONFIGURED, _PROVIDER
+
+    if _CONFIGURED:
+        return _PROVIDER is not None
+    if not _OTEL or not _tracing_enabled(enabled):
+        _CONFIGURED = True
+        return False
+
+    try:
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
+        from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    except Exception:  # pragma: no cover - SDK/exporter extras missing
+        logger.warning("tracing requested but OTel SDK/exporter unavailable", exc_info=True)
+        _CONFIGURED = True
+        return False
+
+    # Give the OTLP/HTTP exporter a default endpoint only if the operator did not
+    # set one of the standard env vars (the exporter reads those natively).
+    if not any(os.environ.get(v) for v in _ENDPOINT_ENV_VARS):
+        os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = _DEFAULT_OTLP_TRACES_ENDPOINT
+
+    resource = Resource.create({SERVICE_NAME: service_name, **(resource_attributes or {})})
+    provider = TracerProvider(resource=resource)
+    provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+    trace.set_tracer_provider(provider)
+
+    _PROVIDER = provider
+    _CONFIGURED = True
+    logger.info("tracing configured: service=%s exporter=otlp/http", service_name)
+    return True
+
+
+def shutdown_tracing() -> None:
+    """Flush and shut down the configured provider (call at process exit).
+
+    Safe to call unconditionally — a no-op when tracing was never configured.
+    Short-lived host processes need this so buffered spans are exported before
+    the process dies (``BatchSpanProcessor`` exports asynchronously).
+    """
+    global _PROVIDER, _CONFIGURED
+    if _PROVIDER is not None:
+        try:
+            _PROVIDER.shutdown()
+        except Exception:  # pragma: no cover - best-effort flush
+            logger.debug("tracing shutdown failed", exc_info=True)
+        finally:
+            _PROVIDER = None
+    _CONFIGURED = False
 
 
 def _coerce(value: Any) -> Any:
@@ -178,3 +298,17 @@ def extract_context(carrier: Mapping[str, str]) -> Any:
         except Exception:  # pragma: no cover
             logger.debug("traceparent extraction failed", exc_info=True)
     return None
+
+
+def apply_sandbox_env(env: MutableMapping[str, str]) -> None:
+    """Copy the host's OTLP env vars into ``env`` (non-overriding).
+
+    So an exporter running inside a sandbox ships to the same backend and its
+    spans stitch into the host trace. Mutates ``env`` in place: only vars set in
+    the host environment and not already present in ``env`` are added, so an
+    explicit per-agent value always wins over the inherited host setting.
+    """
+    for var in _FORWARD_ENV_VARS:
+        value = os.environ.get(var)
+        if value and var not in env:
+            env[var] = value

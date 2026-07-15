@@ -293,8 +293,14 @@ def main() -> None:
 
     config = TabbyConfig.from_env()
     logging.basicConfig(level=logging.INFO)
+    # Install the OTLP exporter before serving so the in-sandbox bridge's spans
+    # (and the trace context carried in from the host) actually reach Phoenix.
+    tel.configure_tracing(f"tabby-llm-agent@{config.version}")
     logger.info("starting tabby A2A bridge on :%d -> %s", config.bridge_port, config.base_url)
-    uvicorn.run(build_bridge_app(config), host="0.0.0.0", port=config.bridge_port)
+    try:
+        uvicorn.run(build_bridge_app(config), host="0.0.0.0", port=config.bridge_port)
+    finally:
+        tel.shutdown_tracing()
 
 
 if __name__ == "__main__":  # pragma: no cover - container entrypoint

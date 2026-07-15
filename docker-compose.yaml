@@ -1,0 +1,28 @@
+# Local observability stack for Atrium.
+#
+# Brings up Arize Phoenix, which serves both the trace UI and an OTLP collector.
+# Atrium ships spans here over plain OTLP/HTTP (vendor-neutral) — see
+# docs/design/observability.md.
+#
+#   docker compose up -d phoenix
+#   open http://localhost:6006
+#
+# Then point the runtime at it:
+#   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:6006/v1/traces
+
+services:
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: atrium-phoenix
+    ports:
+      - "6006:6006" # UI + OTLP/HTTP collector (/v1/traces)
+      - "4317:4317" # OTLP/gRPC collector (alternative transport)
+    environment:
+      # Persist traces across restarts in the named volume below.
+      - PHOENIX_WORKING_DIR=/data
+    volumes:
+      - phoenix-data:/data
+    restart: unless-stopped
+
+volumes:
+  phoenix-data:

@@ -15,5 +15,11 @@ venv/
 .ruff_cache/
 .mypy_cache/
 
+# Local env / secrets (.env.example is committed)
+.env
+
+# Claude Code local worktrees / settings
+.claude/
+
 # OS / editor
 .DS_Store
