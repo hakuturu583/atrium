@@ -22,6 +22,14 @@ services:
       - PHOENIX_WORKING_DIR=/data
     volumes:
       - phoenix-data:/data
+    healthcheck:
+      # So `docker compose up --wait` (the programmatic bootstrap) gates on the
+      # collector actually serving. Exec form (no shell) + a TCP-connect probe:
+      # the Phoenix image is distroless (no /bin/sh) but ships python3.
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost',6006),timeout=3).close()"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     restart: unless-stopped
 
   # --------------------------------------------------------------------- #
@@ -64,6 +72,12 @@ services:
     depends_on:
       prefect-db:
         condition: service_healthy
+    healthcheck:
+      # Gate `--wait` (and the worker's depends_on) on the API actually answering.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
     restart: unless-stopped
 
   # Serves the workboard flow as a deployment and executes its runs. Runs the
@@ -73,9 +87,11 @@ services:
     image: prefecthq/prefect:3-latest
     container_name: atrium-prefect-worker
     working_dir: /app
+    # --no-bootstrap: compose already brings up the deps, and this container must
+    # never reach the host Docker daemon (only the trusted main process does).
     command: >
       bash -lc "pip install --no-cache-dir -e . &&
-                python -m atrium.orchestration.serve"
+                python -m atrium.orchestration.serve --no-bootstrap"
     environment:
       - PREFECT_API_URL=http://prefect-server:4200/api
       # Ship the flow's spans to the same Phoenix so board runs stitch into the
@@ -84,7 +100,8 @@ services:
     volumes:
       - ./:/app:ro
     depends_on:
-      - prefect-server
+      prefect-server:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

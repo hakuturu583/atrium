@@ -34,6 +34,13 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
+from atrium.orchestration.bootstrap import (
+    BootstrapConfig,
+    OrchestrationBootstrapError,
+    OrchestrationEndpoints,
+    ensure_orchestration_services,
+    stop_orchestration_services,
+)
 from atrium.orchestration.cancel import (
     CancellableAgentExecutor,
     CancelToken,
@@ -86,6 +93,12 @@ __all__ = [
     "raise_if_cancelled",
     "CancellableAgentExecutor",
     "request_remote_cancel",
+    # Dependency-service bootstrap (drives docker-compose; Prefect-free)
+    "ensure_orchestration_services",
+    "stop_orchestration_services",
+    "BootstrapConfig",
+    "OrchestrationEndpoints",
+    "OrchestrationBootstrapError",
     # Prefect-backed job entry point (imported lazily — see module docstring)
     "WORKBOARD_FLOW_NAME",
     "build_workboard_flow",
