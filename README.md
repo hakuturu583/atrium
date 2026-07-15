@@ -76,7 +76,7 @@ Four principles drive every design decision:
 | Agent | Kind | Role |
 | --- | --- | --- |
 | `BuilderAgent` | fixed infra | Turns a `{filename: content}` build request into a container image with **rootless Kaniko**, pushes it to the internal registry, replies with the immutable `sha256:…` digest. Never mounts the Docker socket, never gets WAN or GPU. Excluded from the evolution loop. |
-| `InferenceAgent` → `TabbyLLMAgent` | GPU inference | LLM inference on [tabbyAPI](https://github.com/theroyallab/tabbyAPI) / exllamav3, run `NetworkMode.INTERNAL` (WAN blocked). An in-sandbox bridge translates the OpenAI-style API to/from A2A so that protocol never crosses the agent boundary. |
+| `InferenceAgent` → `TabbyLLMAgent` | GPU inference | LLM inference on [tabbyAPI](https://github.com/theroyallab/tabbyAPI) / exllamav3, run `NetworkMode.INTERNAL` (WAN blocked). An in-sandbox bridge translates the OpenAI-style API to/from A2A so that protocol never crosses the agent boundary. On one GPU the weights load once: a **backend-owning** agent hosts the model and any number of **client** agents (`TabbyLLMAgent.connect(...)`) fan into it, served concurrently via tabbyAPI's continuous batching — each client costs only its slice of the shared (optionally quantized) KV cache (`KVCacheConfig`). |
 | `CodeWorkspaceAgent` → `PythonCodeWorkspaceAgent` | code workspace | Operates a code-execution workspace sandbox (clone → stage → run → commit/push/PR). Allowed WAN (for GitHub); no GPU, no Docker socket. |
 | `TaskAgent` → `SlackTaskAgent` | evolution *(in progress)* | The start of the self-evolution loop: takes a task, authors a new agent generation (source + Dockerfile), and drives BuilderAgent over A2A. |
 

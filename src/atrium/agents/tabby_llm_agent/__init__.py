@@ -22,5 +22,12 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from atrium.agents.tabby_llm_agent.agent import TabbyAgentConfig, TabbyLLMAgent
+from atrium.agents.tabby_llm_agent.cache import KVCacheConfig, plan_cache_size
 
-__all__ = ["TabbyLLMAgent", "TabbyAgentConfig", "__version__"]
+__all__ = [
+    "TabbyLLMAgent",
+    "TabbyAgentConfig",
+    "KVCacheConfig",
+    "plan_cache_size",
+    "__version__",
+]

@@ -16,13 +16,17 @@ import json
 
 import pytest
 
-from atrium.agents.tabby_llm_agent import TabbyLLMAgent
+from atrium.agents.tabby_llm_agent import (
+    KVCacheConfig,
+    TabbyLLMAgent,
+    plan_cache_size,
+)
 from atrium.agents.tabby_llm_agent.agent import (
     STATUS_NOT_READY,
     STATUS_OK,
     STATUS_TOOL_CALLS,
 )
-from atrium.core.errors import ModelNotReadyError
+from atrium.core.errors import ModelNotReadyError, PolicyViolationError
 from atrium.protocol import data_message, get_message_data, text_message
 
 
@@ -186,6 +190,160 @@ def test_load_model_sends_model_name():
     assert req["type"] == "load"
     assert req["model_name"] == "Ornith-1.0-35B"
     assert agent.config.model_name == "Ornith-1.0-35B"
+
+
+def test_load_model_forwards_cache_options():
+    agent = _agent()
+    sent = _script(agent, [_ok("")])
+    cache = KVCacheConfig.for_agents(8, max_seq_len=32768, cache_mode="Q6")
+    asyncio.run(agent.load_model("Ornith-1.0-35B", cache=cache))
+    req = _last_request(sent)
+    assert req["cache_mode"] == "Q6"
+    assert req["cache_size"] == 8 * 32768
+    assert req["max_seq_len"] == 32768
+    assert req["max_batch_size"] == 8
+
+
+def test_load_model_explicit_option_overrides_cache():
+    agent = _agent()
+    sent = _script(agent, [_ok("")])
+    cache = KVCacheConfig(cache_mode="Q6", cache_size=1000)
+    asyncio.run(agent.load_model("m", cache=cache, cache_size=2000))
+    req = _last_request(sent)
+    assert req["cache_size"] == 2000  # explicit kwarg wins over cache
+
+
+# --------------------------------------------------------------------------- #
+# Shared backend / client mode                                                 #
+# --------------------------------------------------------------------------- #
+def test_connect_builds_client_mode_agent():
+    client = TabbyLLMAgent.connect(
+        "reviewer-1", "http://coder-1.local:8730", model_name="Ornith-1.0-35B"
+    )
+    assert client.is_client is True
+    assert client.config.bridge_url == "http://coder-1.local:8730"
+    assert client.config.model_name == "Ornith-1.0-35B"
+    # A client owns no sandbox, so it declares no GPU requirement of its own.
+    assert client._require_gpu is False
+
+
+def test_backend_owner_is_not_client():
+    agent = _agent()
+    assert agent.is_client is False
+    assert agent._require_gpu is True
+
+
+def test_client_start_sandbox_is_noop():
+    client = TabbyLLMAgent.connect("reviewer-1", "http://coder-1.local:8730")
+    asyncio.run(client.start_sandbox())
+    # No sandbox is created for a client; it only talks A2A to the shared bridge.
+    assert client.is_running is False
+    assert client.current_sandbox is None
+
+
+def test_client_routes_inference_to_shared_bridge():
+    client = TabbyLLMAgent.connect("reviewer-1", "http://coder-1.local:8730")
+    client.config.retry_backoff_s = 0
+    targets: list = []
+
+    async def fake_send(target, message):
+        targets.append(target)
+        return _ok("shared reply")
+
+    client.send_a2a_message = fake_send  # type: ignore[assignment]
+    out = asyncio.run(client.infer("review this"))
+    assert out == "shared reply"
+    assert targets == ["http://coder-1.local:8730"]
+
+
+def test_client_cannot_load_model():
+    client = TabbyLLMAgent.connect("reviewer-1", "http://coder-1.local:8730")
+    with pytest.raises(PolicyViolationError, match="backend-owner operation"):
+        asyncio.run(client.load_model("Ornith-1.0-35B"))
+
+
+def test_client_cannot_unload_model():
+    client = TabbyLLMAgent.connect("reviewer-1", "http://coder-1.local:8730")
+    with pytest.raises(PolicyViolationError, match="backend-owner operation"):
+        asyncio.run(client.unload_model())
+
+
+def test_client_may_check_readiness():
+    # Read-only readiness is open to clients waiting on the shared model.
+    client = TabbyLLMAgent.connect("reviewer-1", "http://coder-1.local:8730")
+    _script(client, [_ok("")])
+    assert asyncio.run(client.is_model_ready()) is True
+
+
+def test_bridge_url_of_backend_owner_is_host_local():
+    agent = _agent()  # id "coder-1", no bridge_url -> owns its backend
+    assert agent.bridge_url() == "http://coder-1.local:8730"
+
+
+def test_clients_infer_concurrently_against_one_backend():
+    """Several client agents drive one shared backend *in parallel*.
+
+    A ``Barrier`` sized to the fleet only releases once every client's request is
+    in flight — so if ``infer`` calls were serialized, the first would block
+    forever waiting for siblings that never started and ``wait_for`` would time
+    out. Passing proves all N requests overlap on the one shared bridge, which is
+    exactly the fan-in tabbyAPI then serves via continuous batching.
+    """
+    bridge = "http://coder-1.local:8730"
+    clients = [TabbyLLMAgent.connect(f"agent-{i}", bridge) for i in range(4)]
+    n = len(clients)
+    barrier = asyncio.Barrier(n)
+    targets: list = []
+
+    async def shared_backend(target, message):
+        targets.append(target)
+        await barrier.wait()  # all N must arrive before any proceeds
+        prompt = get_message_data(message)[0]["messages"][-1]["content"]
+        return _ok(f"handled:{prompt}")
+
+    for client in clients:
+        client.send_a2a_message = shared_backend  # type: ignore[assignment]
+
+    async def run():
+        return await asyncio.gather(
+            *(client.infer(f"req-{i}") for i, client in enumerate(clients))
+        )
+
+    outs = asyncio.run(asyncio.wait_for(run(), timeout=5))
+    # gather preserves input order regardless of completion order.
+    assert outs == [f"handled:req-{i}" for i in range(n)]
+    # Every client fanned into the *same* shared backend.
+    assert targets == [bridge] * n
+
+
+# --------------------------------------------------------------------------- #
+# KV cache sizing                                                              #
+# --------------------------------------------------------------------------- #
+def test_plan_cache_size_spans_the_fleet():
+    assert plan_cache_size(8, 32768) == 8 * 32768
+
+
+def test_plan_cache_size_rejects_nonpositive():
+    with pytest.raises(ValueError):
+        plan_cache_size(0, 32768)
+
+
+def test_kv_cache_config_rejects_bad_mode():
+    with pytest.raises(ValueError, match="cache_mode"):
+        KVCacheConfig(cache_mode="Q3")
+
+
+def test_kv_cache_load_options_omits_unset():
+    opts = KVCacheConfig(cache_mode="Q8").load_options()
+    assert opts == {"cache_mode": "Q8"}  # None fields are dropped
+
+
+def test_for_agents_preset_defaults():
+    cache = KVCacheConfig.for_agents(4)
+    assert cache.cache_mode == "Q6"
+    assert cache.max_seq_len == 32768
+    assert cache.cache_size == 4 * 32768
+    assert cache.max_batch_size == 4
 
 
 def test_unload_model_clears_ready_flag():
