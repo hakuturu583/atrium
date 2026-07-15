@@ -24,5 +24,69 @@ services:
       - phoenix-data:/data
     restart: unless-stopped
 
+  # --------------------------------------------------------------------- #
+  # Workboard orchestration (fixed infrastructure).                        #
+  #                                                                        #
+  # Prefect is Atrium's job-execution entry point: every job runs as a     #
+  # workboard (a task-dependency DAG) whose run is kicked over the Prefect  #
+  # API and visible in the UI. Trusted infra (same tier as the registry    #
+  # and the Morpher) — agents never talk to it directly. See               #
+  # docs/design/orchestration-workboard.md.                                #
+  #                                                                        #
+  #   docker compose up -d                                                  #
+  #   open http://localhost:4200        # Prefect UI                       #
+  # --------------------------------------------------------------------- #
+  prefect-db:
+    image: postgres:16
+    container_name: atrium-prefect-db
+    environment:
+      - POSTGRES_USER=prefect
+      - POSTGRES_PASSWORD=prefect
+      - POSTGRES_DB=prefect
+    volumes:
+      - prefect-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prefect"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    container_name: atrium-prefect-server
+    command: prefect server start --host 0.0.0.0
+    ports:
+      - "4200:4200" # Prefect UI + REST API
+    environment:
+      - PREFECT_SERVER_API_HOST=0.0.0.0
+      - PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://prefect:prefect@prefect-db:5432/prefect
+    depends_on:
+      prefect-db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Serves the workboard flow as a deployment and executes its runs. Runs the
+  # trusted node-runner: it holds the A2A reach to agents and is the sole writer
+  # of board state (agents only *propose* changes in their replies).
+  prefect-worker:
+    image: prefecthq/prefect:3-latest
+    container_name: atrium-prefect-worker
+    working_dir: /app
+    command: >
+      bash -lc "pip install --no-cache-dir -e . &&
+                python -m atrium.orchestration.serve"
+    environment:
+      - PREFECT_API_URL=http://prefect-server:4200/api
+      # Ship the flow's spans to the same Phoenix so board runs stitch into the
+      # cross-agent trace (see docs/design/observability.md).
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
+    volumes:
+      - ./:/app:ro
+    depends_on:
+      - prefect-server
+    restart: unless-stopped
+
 volumes:
   phoenix-data:
+  prefect-db-data:
