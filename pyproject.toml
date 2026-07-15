@@ -1,7 +1,7 @@
 [project]
 name = "atrium"
 version = "0.1.0"
-description = "Add your description here"
+description = "A self-evolving, security-isolated multi-agent runtime: physically-isolated OpenShell sandboxes, one A2A protocol, distributed tracing, and a registry-as-ledger with attestation-gated generational swaps."
 readme = "README.md"
 authors = [
     { name = "Masaya Kataoka", email = "ms.kataoka@gmail.com" }
