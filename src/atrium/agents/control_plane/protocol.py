@@ -31,6 +31,7 @@ from atrium.protocol import (
     data_part,
     get_message_data,
     get_message_text,
+    metadata_dict,
     text_message,
 )
 
@@ -44,7 +45,9 @@ __all__ = [
     "build_submit_request",
     "parse_submit_request",
     "build_submitted_reply",
+    "parse_submitted_reply",
     "build_job_update",
+    "parse_job_update",
 ]
 
 #: A2A ``metadata.kind`` routing hints for the two directions.
@@ -171,6 +174,14 @@ def build_submitted_reply(
     )
 
 
+def parse_submitted_reply(message: Message) -> dict[str, Any]:
+    """Read a ``workboard_submitted`` ack into ``{status, job_id}``."""
+    for part in get_message_data(message):
+        if part.get("type") == SUBMITTED_TYPE:
+            return {"status": str(part.get("status", "ok")), "job_id": str(part.get("job_id", ""))}
+    return {"status": str(metadata_dict(message).get("status", "error")), "job_id": ""}
+
+
 def build_job_update(
     job_id: str,
     *,
@@ -197,3 +208,16 @@ def build_job_update(
             "result": dict(result or {}),
         },
     )
+
+
+def parse_job_update(message: Message) -> dict[str, Any]:
+    """Read a ``job_update`` push into ``{job_id, status, coords, result}`` (``{}`` if absent)."""
+    for part in get_message_data(message):
+        if part.get("type") == JOB_UPDATE_TYPE:
+            return {
+                "job_id": str(part.get("job_id", "")),
+                "status": str(part.get("status", "")),
+                "coords": dict(part.get("coords") or {}),
+                "result": dict(part.get("result") or {}),
+            }
+    return {}

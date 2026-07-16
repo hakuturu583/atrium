@@ -16,9 +16,12 @@ from atrium.agents.control_plane import ControlPlaneAgent
 from atrium.agents.control_plane.protocol import (
     KIND_SUBMIT,
     SUBMITTED_TYPE,
+    build_job_update,
     build_submit_request,
     build_submitted_reply,
+    parse_job_update,
     parse_submit_request,
+    parse_submitted_reply,
 )
 from atrium.core.types import NetworkMode
 from atrium.protocol import data_part, get_message_data, metadata_dict, text_message
@@ -178,3 +181,22 @@ def test_submitted_reply_error_status():
     reply = build_submitted_reply("boom", status="error")
     assert metadata_dict(reply)["status"] == "error"
     assert get_message_data(reply)[0]["status"] == "error"
+
+
+def test_submitted_reply_roundtrip():
+    parsed = parse_submitted_reply(build_submitted_reply("flow-run-9"))
+    assert parsed == {"status": "ok", "job_id": "flow-run-9"}
+
+
+def test_job_update_roundtrip():
+    msg = build_job_update(
+        "flow-run-9", status="ok",
+        coords={"channel": "C1", "thread_ts": "42"}, result={"digest": "sha256:abc"},
+    )
+    parsed = parse_job_update(msg)
+    assert parsed["job_id"] == "flow-run-9"
+    assert parsed["status"] == "ok"
+    assert parsed["coords"] == {"channel": "C1", "thread_ts": "42"}
+    assert parsed["result"] == {"digest": "sha256:abc"}
+    # A non-update message parses to empty.
+    assert parse_job_update(build_submitted_reply("x")) == {}

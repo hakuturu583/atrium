@@ -27,7 +27,9 @@ from atrium.agents.control_plane.protocol import (
     build_job_update,
     build_submit_request,
     build_submitted_reply,
+    parse_job_update,
     parse_submit_request,
+    parse_submitted_reply,
 )
 
 __all__ = [
@@ -36,7 +38,9 @@ __all__ = [
     "build_submit_request",
     "parse_submit_request",
     "build_submitted_reply",
+    "parse_submitted_reply",
     "build_job_update",
+    "parse_job_update",
     "KIND_SUBMIT",
     "KIND_UPDATE",
     "SUBMIT_TYPE",
