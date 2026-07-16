@@ -189,23 +189,42 @@ A2A contract, no result-routing rewritten.
 
 ### 動線1 — register work on the WorkBoard
 
-`submit_work` → control plane → `kick.submit_job(agent, instruction,
-payload=…, context_id=ctx, review=…)` → Prefect flow-run id. Fire-and-forget: the
-interface acks "received (job `xxx`)"; the terminal state comes back as a
-`job_update` carrying the ride-along thread coords, posted into the thread.
+The control plane picks the doer from the turn (**target-agent routing**, D5) and
+`submit_work` → `kick.submit_job(agent, instruction, payload=…, context_id=ctx,
+review=…)` → Prefect flow-run id. Fire-and-forget: the interface acks "received
+(job `xxx`)"; **progress/terminal state comes back as a `job_update`** (D6)
+carrying the ride-along thread coords, posted into the thread.
+
+**D5 — Target-agent routing (required).** Choosing the doer is the control
+plane's job, not the interface's (the interface stays app-only). Start with a
+configured default (`python_code_workspace_agent:active`) plus an explicit
+override (an `@agent` mention / slash-target parsed into the turn); a richer
+router (by intent/capability) slots in behind the same seam later.
+
+**D6 — Progress notifications: push, fallback poll (required).** A Prefect
+terminal/transition-state hook pushes a `job_update` to the control plane, which
+relays it to the interface for delivery into the thread. Where a hook can't fire
+(or is lost), the control plane falls back to polling `workboard_state(job_id)`.
+The interface only ever *renders* a `job_update`; it does not poll.
 
 ### 動線2 — intervene in the inference agent's prompt
 
 - **(a) submit-time steering** — human context folded into `payload["steering"]`;
   rides `WorkNode.payload` → `build_node_request` data part → the doer's prompt.
   No orchestration change; a payload convention.
-- **(b) mid-flight feedback (rework)** — modeled as the **review gate**:
-  `ReviewPolicy.reviewer` is a Slack-backed human reviewer. The runner sends the
-  deliverable to it (`review.build_review_request`); the human's in-thread reply
-  becomes the verdict, which the runner threads into the next attempt as
-  `payload["review_feedback"]` (`runner.py`, existing). Under option A the human's
-  reply still enters via the interface → control plane → (relay to waiting
-  reviewer/runner), so the single-egress rule holds.
+- **(b) mid-flight feedback (rework)** — modeled as the **review gate, brokered by
+  the control plane; there is no separate Slack reviewer agent.** For a
+  human-gated node the reviewer target is a *human-review capability on the
+  control plane*: it posts the deliverable into the originating thread **through
+  the one interface** (via `context_id`) and marks the session's `pending_review`.
+  The human's in-thread reply re-enters that **single Slack boundary** — the
+  interface — and is forwarded to the control plane with `feedback_for=<token>`
+  (the field already in the submit contract, and the `feedback_for` branch already
+  stubbed in `ControlPlaneAgent`). The control plane resolves the waiting review;
+  the runner threads the verdict into the next attempt as
+  `payload["review_feedback"]` (`runner.py`, existing). Automated (non-human)
+  reviewers remain ordinary reviewer agents — only the human-via-chat case needs
+  no agent of its own.
 
 **Nothing in `orchestration` core changes**: both flows ride `submit_job`,
 `context_id`, `ReviewPolicy.reviewer`, and the `review_feedback` payload seam that
@@ -223,7 +242,7 @@ already exist.
     "slack": { "channel": "C1", "thread_ts": "…", "user": "U9" },  // ride-along reply coords
     "steering": { … }                                              // 動線2(a)
   },
-  "review": { "reviewer": "slack_reviewer:active", … },            // 動線2(b), optional
+  "review": { "reviewer": "<automated agent | control-plane human-review>", … }, // optional gate
   "feedback_for": "<review-token>"                                 // set when relaying a human reply
 }
 // control plane → interface
@@ -240,8 +259,9 @@ already exist.
   **remove** `agents/task_agent/slack.py` (moves out); keep `DelegatingTaskAgent`.
 - **`atrium_agents`**: add `InterfaceAgent` base + `Turn` + `SessionStore`, and
   `SlackInterfaceAgent` (parse/render/deliver + `SOURCE="slack"`); register as
-  `slack_interface_agent`. A future `SlackReviewerAgent` (for 動線2b) lives here
-  too and may share the same Slack transport helpers.
+  `slack_interface_agent`. There is deliberately **no** separate Slack reviewer
+  agent — human review is brokered by the control plane through this one interface
+  (§動線2b).
 - The rename/move **cannot complete in the core repo alone** — the destination is
   `atrium_agents`.
 
@@ -253,16 +273,18 @@ already exist.
 | `InterfaceAgent` base + `Turn` + `SessionStore` | **DESIGN** |
 | `SlackInterfaceAgent` (rename + move to `atrium_agents`) | **DESIGN** |
 | `ControlPlaneAgent` + shared submit/update contract (core) | **DONE (core)** — `atrium.agents.control_plane`, unit-tested; submit path kicks `submit_job`, feedback-relay refused pending 動線2(b) |
-| 動線2(b) `SlackReviewerAgent` on the review gate | **DESIGN** |
+| Target-agent routing in the control plane (D5) | **DESIGN** (default + `@agent` override first) |
+| Progress `job_update` push, fallback poll (D6) | **DESIGN** (`build_job_update` seam already in the contract) |
+| 動線2(b) human review — control-plane-brokered via `feedback_for` (no Slack reviewer agent) | **DESIGN** (reviewer-waiting model open) |
 | `orchestration` core changes | **NONE NEEDED** (rides existing seams) |
 
 ## Deferred / open
 
-- **Progress notifications**: push a `job_update` from a Prefect terminal-state
-  hook vs. the control plane polling `workboard_state`. Lean push, fallback poll.
-- **Target-agent routing**: how the control plane picks the doer from a turn —
-  fixed `python_code_workspace_agent:active` first, routing later.
 - **Human-reviewer waiting model**: block the review A2A request vs. ticket it
-  asynchronously. Long human waits favor async.
+  asynchronously. Long human waits favor async. (The only sub-decision left in
+  動線2b now that it is control-plane-brokered.)
 - **Session cache durability**: in-memory + rebuild-on-miss vs. a small durable
   store; rebuild-on-miss is the default given D3.
+
+*(Target-agent routing and progress notifications were promoted out of this list —
+see D5 and D6.)*
