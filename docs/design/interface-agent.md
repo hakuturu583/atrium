@@ -252,7 +252,7 @@ already exist.
 | Peel orchestration out of `SlackTaskAgent` (gateway + `DelegatingTaskAgent`) | **DONE (working tree)**, unit-tested |
 | `InterfaceAgent` base + `Turn` + `SessionStore` | **DESIGN** |
 | `SlackInterfaceAgent` (rename + move to `atrium_agents`) | **DESIGN** |
-| `ControlPlaneAgent` + shared submit/update contract (core) | **DESIGN** |
+| `ControlPlaneAgent` + shared submit/update contract (core) | **DONE (core)** — `atrium.agents.control_plane`, unit-tested; submit path kicks `submit_job`, feedback-relay refused pending 動線2(b) |
 | 動線2(b) `SlackReviewerAgent` on the review gate | **DESIGN** |
 | `orchestration` core changes | **NONE NEEDED** (rides existing seams) |
 
