@@ -187,7 +187,7 @@ def _submit(agent, monkeypatch, *, job_id, coords):
 def test_submit_tracks_reply_coords(monkeypatch):
     agent = _agent()
     _submit(agent, monkeypatch, job_id="j1", coords={"channel": "C1", "thread": "9"})
-    assert agent._pending["j1"] == {"channel": "C1", "thread": "9"}
+    assert agent._pending["j1"]["coords"] == {"channel": "C1", "thread": "9"}
 
 
 def test_poll_pushes_job_update_when_done(monkeypatch):
@@ -234,6 +234,82 @@ def test_failed_job_pushes_error_status(monkeypatch):
     monkeypatch.setattr("atrium.agents.control_plane.agent.workboard_state", fake_state)
     asyncio.run(agent.poll_once())
     assert parse_job_update(pushed[0][1])["status"] == "error"
+
+
+# --------------------------------------------------------------------------- #
+# 動線2(b) — async human review (post-hoc ticket loop)                          #
+# --------------------------------------------------------------------------- #
+def _submit_human(agent, monkeypatch, *, job_id, ctx="slack:C1:9", coords=None):
+    _script_kick(monkeypatch, job_id=job_id)
+    msg = build_submit_request(
+        "widget_agent:active", "build a widget", context_id=ctx,
+        payload={"reply_coords": coords or {"channel": "C1", "thread": "9"}},
+        review={"human": True},
+    )
+    asyncio.run(agent.dispatch(msg))
+
+
+def _finish(agent, monkeypatch, *, completed=True):
+    async def fake_state(job_id):
+        return {"id": job_id, "state": "COMPLETED" if completed else "FAILED", "done": True}
+
+    monkeypatch.setattr("atrium.agents.control_plane.agent.workboard_state", fake_state)
+
+
+def test_completed_human_review_opens_ticket_not_done(monkeypatch):
+    agent = _agent(interface="http://interface.local")
+    _submit_human(agent, monkeypatch, job_id="j1")
+    pushed = _capture_pushes(agent)
+    _finish(agent, monkeypatch, completed=True)
+    asyncio.run(agent.poll_once())
+
+    # It presents the deliverable for review (status=review) with a token, not "ok".
+    upd = parse_job_update(pushed[0][1])
+    assert upd["status"] == "review"
+    assert upd["result"]["token"] == "slack:C1:9"
+    assert "slack:C1:9" in agent._tickets  # ticket parked
+    assert "j1" not in agent._pending
+
+
+def test_approval_closes_ticket_as_done(monkeypatch):
+    agent = _agent(interface="http://interface.local")
+    _submit_human(agent, monkeypatch, job_id="j1")
+    _finish(agent, monkeypatch, completed=True)
+    pushed = _capture_pushes(agent)
+    asyncio.run(agent.poll_once())  # pushes the review presentation
+
+    # Human approves via a feedback_for submit.
+    reply = build_submit_request("", "LGTM", context_id="slack:C1:9", feedback_for="slack:C1:9")
+    asyncio.run(agent.dispatch(reply))
+
+    assert parse_job_update(pushed[-1][1])["status"] == "ok"  # last push is the done update
+    assert "slack:C1:9" not in agent._tickets  # closed
+
+
+def test_request_changes_kicks_rework(monkeypatch):
+    agent = _agent(interface="http://interface.local")
+    _submit_human(agent, monkeypatch, job_id="j1")
+    _finish(agent, monkeypatch, completed=True)
+    _capture_pushes(agent)
+    asyncio.run(agent.poll_once())  # pushes the review presentation
+
+    # Human asks for changes → a rework job is kicked with the feedback as steering.
+    rework_calls = _script_kick(monkeypatch, job_id="j2")
+    reply = build_submit_request("", "please add error handling", context_id="slack:C1:9", feedback_for="slack:C1:9")
+    ack = asyncio.run(agent.dispatch(reply))
+
+    assert rework_calls[0]["agent"] == "widget_agent:active"  # same doer
+    assert rework_calls[0]["payload"]["steering"]["review_feedback"] == "please add error handling"
+    assert get_message_data(ack)[0]["job_id"] == "j2"
+    # The rework job is itself tracked for human review (the loop continues).
+    assert agent._pending["j2"]["human_review"] is True
+
+
+def test_feedback_for_unknown_review_errors(monkeypatch):
+    agent = _agent()
+    reply = build_submit_request("", "hi", feedback_for="nope")
+    out = asyncio.run(agent.dispatch(reply))
+    assert metadata_dict(out)["status"] == "error"
 
 
 def test_feedback_relay_is_refused_not_submitted(monkeypatch):

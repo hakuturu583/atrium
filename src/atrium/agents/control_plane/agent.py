@@ -47,6 +47,13 @@ DEFAULT_INITIAL_VERSION = "0.1.0"
 #: turn and the control plane routes; a coding turn defaults to a code workspace).
 DEFAULT_DOER = "python_code_workspace_agent:active"
 
+#: ``job_update`` status that asks the interface to present a deliverable for human
+#: review (動線2b, async ticket) rather than reporting a terminal outcome.
+REVIEW_STATUS = "review"
+
+#: Human verdict tokens that count as approval; anything else is request-changes.
+_APPROVE_TOKENS = ("approve", "lgtm", "ok", "👍", ":+1:", "looks good", "ship it")
+
 
 class ControlPlaneAgent(BaseAgent):
     """Receive ``workboard.submit`` and kick a workboard run over Prefect."""
@@ -73,32 +80,41 @@ class ControlPlaneAgent(BaseAgent):
         #: The interface to push a :func:`job_update <build_job_update>` to when a
         #: job finishes (D6). ``None`` disables the push (poll-only / no delivery).
         self.interface = interface
-        #: job_id → ride-along reply coords, for the completion push. In-memory and
-        #: reconstructable (the same coords ride in the flow-run's parameters).
+        #: job_id → job record (coords, context_id, instruction, doer, human_review)
+        #: for the completion push. In-memory and reconstructable (the same coords
+        #: ride in the flow-run's parameters).
         self._pending: dict[str, dict[str, Any]] = {}
+        #: review token → open ticket, for the async human-review loop (動線2b).
+        self._tickets: dict[str, dict[str, Any]] = {}
 
     async def handle_task(self, message: Message) -> Message:
-        """Validate the submit and kick a run; reply with the flow-run id."""
+        """Route an inbound submit: a human reply resolves a review, else kick a run."""
         req = parse_submit_request(message)
         if req.feedback_for is not None:
-            # 動線2(b): relaying a human reply into a waiting review. The reviewer
-            # waiting model is still open (see the design doc); refuse rather than
-            # silently spawn a duplicate job.
-            logger.info("feedback relay for %s not yet supported", req.feedback_for)
-            return build_submitted_reply(
-                f"feedback relay not yet implemented (review {req.feedback_for})",
-                request=message,
-                status="error",
-            )
+            # 動線2(b): a human reply resolving an open review ticket (async).
+            return await self._resolve_ticket(req, message)
         target = self._route(req)
         if not target:
             return build_submitted_reply("no doer agent and no default configured", request=message, status="error")
         job_id = await self._kick(req, target)
-        # Remember where to deliver this job's result (ride-along reply coords) so
-        # a later job_update can be pushed back to the originating thread (D6).
-        self._pending[job_id] = dict(req.payload.get("reply_coords") or {})
+        self._track(job_id, req, target)
         logger.info("kicked job %s (doer %s) for context %s", job_id, target, req.context_id)
         return build_submitted_reply(job_id, request=message)
+
+    def _track(self, job_id: str, req: SubmitRequest, doer: str) -> None:
+        """Record what a later completion needs: where to deliver, and how to rework."""
+        self._pending[job_id] = {
+            "coords": dict(req.payload.get("reply_coords") or {}),
+            "context_id": req.context_id,
+            "instruction": req.instruction,
+            "doer": doer,
+            "human_review": self._wants_human_review(req),
+        }
+
+    @staticmethod
+    def _wants_human_review(req: SubmitRequest) -> bool:
+        """Whether this job's deliverable should be gated on a human (``review.human``)."""
+        return bool(req.review) and bool(req.review.get("human"))
 
     def _route(self, req: SubmitRequest) -> str:
         """Pick the doer for ``req``: its explicit override, else the default (D5).
@@ -133,11 +149,15 @@ class ControlPlaneAgent(BaseAgent):
         notified this sweep (and stops tracking them).
         """
         notified: list[str] = []
-        for job_id, coords in list(self._pending.items()):
+        for job_id, rec in list(self._pending.items()):
             state = await workboard_state(job_id)
             if not state.get("done"):
                 continue
-            await self.notify(job_id, "ok" if state.get("state") == "COMPLETED" else "error", coords=coords)
+            ok = state.get("state") == "COMPLETED"
+            if ok and rec.get("human_review"):
+                await self._open_ticket(job_id, rec)
+            else:
+                await self.notify(job_id, "ok" if ok else "error", coords=rec.get("coords"))
             notified.append(job_id)
         return notified
 
@@ -155,11 +175,69 @@ class ControlPlaneAgent(BaseAgent):
         hook may pass fresher ones. A no-op (beyond untracking) when no interface
         is configured.
         """
-        coords = coords if coords is not None else self._pending.get(job_id, {})
+        coords = coords if coords is not None else self._coords_of(job_id)
         self._pending.pop(job_id, None)
+        await self._push(build_job_update(job_id, status=status, coords=coords or {}, result=result))
+
+    def _coords_of(self, job_id: str) -> dict[str, Any]:
+        return dict(self._pending.get(job_id, {}).get("coords") or {})
+
+    async def _push(self, message: Message) -> None:
         if self.interface is None:
-            logger.info("no interface configured; job %s %s not pushed", job_id, status)
+            logger.info("no interface configured; job_update not pushed")
             return
-        await self.send_a2a_message(
-            self.interface, build_job_update(job_id, status=status, coords=coords, result=result)
+        await self.send_a2a_message(self.interface, message)
+
+    # ------------------------------------------------------------------ #
+    # 動線2(b) — async human review (post-hoc ticket loop; no gate held)   #
+    # ------------------------------------------------------------------ #
+    async def _open_ticket(self, job_id: str, rec: dict[str, Any]) -> None:
+        """Present a finished deliverable to the human and park a review ticket.
+
+        Async by construction: the run already completed, so nothing is blocked.
+        The interface posts the deliverable (status ``review``), marks its session
+        ``pending_review``, and the human's later reply arrives as a ``feedback_for``
+        submit that :meth:`_resolve_ticket` closes.
+        """
+        token = rec.get("context_id") or job_id
+        self._pending.pop(job_id, None)
+        self._tickets[token] = {**rec, "job_id": job_id}
+        await self._push(
+            build_job_update(
+                job_id,
+                status=REVIEW_STATUS,
+                coords=rec.get("coords") or {},
+                result={"token": token, "instruction": rec.get("instruction", "")},
+            )
         )
+
+    async def _resolve_ticket(self, req: SubmitRequest, message: Message) -> Message:
+        """Close an open review with the human's verdict: approve → done, else rework."""
+        token = req.feedback_for
+        ticket = self._tickets.pop(token, None)
+        if ticket is None:
+            return build_submitted_reply(f"no open review {token}", request=message, status="error")
+        if self._is_approval(req.instruction):
+            await self.notify(str(ticket["job_id"]), "ok", coords=ticket.get("coords"))
+            return build_submitted_reply(str(ticket["job_id"]), request=message)
+        # Request-changes: kick a rework carrying the human feedback as steering.
+        rework = SubmitRequest(
+            agent=str(ticket.get("doer") or ""),
+            instruction=str(ticket.get("instruction") or ""),
+            context_id=token,
+            payload={
+                "reply_coords": dict(ticket.get("coords") or {}),
+                "steering": {"review_feedback": req.instruction},
+            },
+            review={"human": True},
+        )
+        target = self._route(rework)
+        job_id = await self._kick(rework, target)
+        self._track(job_id, rework, target)
+        logger.info("review %s requested changes; kicked rework %s", token, job_id)
+        return build_submitted_reply(job_id, request=message)
+
+    @staticmethod
+    def _is_approval(text: str) -> bool:
+        low = text.strip().lower()
+        return any(tok in low for tok in _APPROVE_TOKENS)

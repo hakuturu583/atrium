@@ -212,23 +212,30 @@ The interface only ever *renders* a `job_update`; it does not poll.
 - **(a) submit-time steering** — human context folded into `payload["steering"]`;
   rides `WorkNode.payload` → `build_node_request` data part → the doer's prompt.
   No orchestration change; a payload convention.
-- **(b) mid-flight feedback (rework)** — modeled as the **review gate, brokered by
-  the control plane; there is no separate Slack reviewer agent.** For a
-  human-gated node the reviewer target is a *human-review capability on the
-  control plane*: it posts the deliverable into the originating thread **through
-  the one interface** (via `context_id`) and marks the session's `pending_review`.
-  The human's in-thread reply re-enters that **single Slack boundary** — the
-  interface — and is forwarded to the control plane with `feedback_for=<token>`
-  (the field already in the submit contract, and the `feedback_for` branch already
-  stubbed in `ControlPlaneAgent`). The control plane resolves the waiting review;
-  the runner threads the verdict into the next attempt as
-  `payload["review_feedback"]` (`runner.py`, existing). Automated (non-human)
-  reviewers remain ordinary reviewer agents — only the human-via-chat case needs
-  no agent of its own.
+- **(b) human review (rework)** — an **async, post-hoc ticket loop brokered by the
+  control plane**; no separate Slack reviewer agent, and (importantly) **nothing
+  is held blocking**. A submit marked `review = {"human": true}` runs to
+  completion *without* an in-orchestration gate; on completion the control plane
+  **opens a ticket** instead of reporting done — it pushes a `job_update` with
+  status `review` (carrying the token = `context_id`) to the interface, which
+  presents the deliverable in the thread and marks the session's `pending_review`.
+  The human's in-thread reply re-enters that **single Slack boundary** and is
+  forwarded with `feedback_for=<token>`; the control plane closes the ticket:
+  **approve → push a done update**, otherwise **kick a rework job** carrying the
+  feedback as `steering.review_feedback` (same `context_id`, itself human-gated —
+  the loop continues). Automated (non-human) reviewers remain ordinary reviewer
+  agents on the in-orchestration gate; only the human case is this control-plane
+  loop.
 
-**Nothing in `orchestration` core changes**: both flows ride `submit_job`,
-`context_id`, `ReviewPolicy.reviewer`, and the `review_feedback` payload seam that
-already exist.
+  *Why post-hoc, not the in-node gate:* `run_node`'s review dispatch is
+  synchronous, so an in-gate human review would either block a Prefect task for
+  human-response time or need orchestration changes. The post-hoc loop is async
+  and needs **neither** — the run finishes, the review happens after, a rework is
+  just another run.
+
+**Nothing in `orchestration` core changes**: 動線1 and 動線2(a) ride `submit_job` /
+`context_id` / `payload`; 動線2(b) is entirely control-plane + interface (the
+review gate, `ReviewPolicy.reviewer`, stays for *automated* reviewers only).
 
 ## Message contract (interface ↔ control plane, defined in core)
 
@@ -270,21 +277,25 @@ already exist.
 | Piece | Status |
 | --- | --- |
 | Peel orchestration out of `SlackTaskAgent` (gateway + `DelegatingTaskAgent`) | **DONE (working tree)**, unit-tested |
-| `InterfaceAgent` base + `Turn` + `SessionStore` | **DESIGN** |
-| `SlackInterfaceAgent` (rename + move to `atrium_agents`) | **DESIGN** |
-| `ControlPlaneAgent` + shared submit/update contract (core) | **DONE (core)** — `atrium.agents.control_plane`, unit-tested; submit path kicks `submit_job`, feedback-relay refused pending 動線2(b) |
+| `InterfaceAgent` base + `Turn` + `SessionStore` | **DONE (`atrium_agents`)** — unit-tested |
+| `SlackInterfaceAgent` (in `atrium_agents`) | **DONE (`atrium_agents`)** — normalize/dedupe/render/deliver, unit-tested |
+| `ControlPlaneAgent` + shared submit/update contract (core) | **DONE (core)** — `atrium.agents.control_plane`, unit-tested; routing, D6 push, async review loop |
 | Target-agent routing in the control plane (D5) | **DONE (core)** — `ControlPlaneAgent._route`: explicit `@agent` override else `default_agent`; `agent` now optional in the contract, unit-tested |
-| Progress `job_update` push, fallback poll (D6) | **DESIGN** (`build_job_update` seam already in the contract) |
-| 動線2(b) human review — control-plane-brokered via `feedback_for` (no Slack reviewer agent) | **DESIGN** (reviewer-waiting model open) |
+| Progress `job_update` push, fallback poll (D6) | **DONE (core)** — `poll_once`/`notify` push a `job_update`; interface renders + delivers |
+| 動線2(b) human review — async post-hoc ticket loop (open → approve/rework via `feedback_for`) | **DONE** — core lifecycle unit-tested; interface presents review + relays reply |
 | `orchestration` core changes | **NONE NEEDED** (rides existing seams) |
 
 ## Deferred / open
 
-- **Human-reviewer waiting model**: block the review A2A request vs. ticket it
-  asynchronously. Long human waits favor async. (The only sub-decision left in
-  動線2b now that it is control-plane-brokered.)
-- **Session cache durability**: in-memory + rebuild-on-miss vs. a small durable
+- **Deliverable in the review ticket**: the ticket currently carries the task
+  instruction + token, not the built artifact (the control plane learns only
+  coarse `workboard_state`, not the flow-run result). Reading the flow-run result
+  (or having the doer echo it) would let the review present the actual output.
+- **Push trigger**: `poll_once` is the fallback poll; a Prefect terminal-state
+  hook calling `notify()`/`_open_ticket` directly is the intended primary trigger
+  (deployment wiring).
+- **Session/ticket durability**: in-memory + rebuild-on-miss vs. a small durable
   store; rebuild-on-miss is the default given D3.
 
-*(Target-agent routing and progress notifications were promoted out of this list —
-see D5 and D6.)*
+*(Reviewer-waiting model resolved: async post-hoc ticket loop, §動線2b. Target-agent
+routing and progress notifications: see D5 and D6.)*
