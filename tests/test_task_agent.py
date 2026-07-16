@@ -1,10 +1,13 @@
-"""Tests for the TaskAgent self-evolution driver and SlackTaskAgent.
+"""Tests for the TaskAgent self-evolution driver and the SlackTaskAgent gateway.
 
 No sandbox or network: the outward A2A seam (``send_a2a_message``) is scripted,
-so the author → build → retry loop, the version-decide, the reply envelope and
-the Slack normalization are all exercised in-process. One test routes the build
-request into a *real* :class:`BuilderAgent` (with its sandbox mocked) to prove
-the request/result schema the two agents exchange actually matches.
+so the author → build → retry loop, the version-decide and the reply envelope are
+exercised in-process against :class:`DelegatingTaskAgent`, while the Slack
+normalization + forward/format behaviour is exercised against the
+:class:`SlackTaskAgent` gateway. One test routes the build request into a *real*
+:class:`BuilderAgent` (with its sandbox mocked) to prove the request/result schema
+the two agents exchange actually matches, and one drives the full
+Slack → gateway → DelegatingTaskAgent → builder chain end to end.
 """
 
 from __future__ import annotations
@@ -18,10 +21,11 @@ from atrium.agents.builder_agent import BuilderAgent
 from atrium.agents.builder_agent.agent import RESULT_TYPE, STATUS_ERROR, STATUS_OK
 from atrium.agents.task_agent import (
     BuildFailedError,
-    BuildOutcome,
+    DelegatingTaskAgent,
     GenerationRequest,
     SlackTaskAgent,
 )
+from atrium.agents.task_agent.agent import TASK_RESULT_TYPE
 from atrium.core.errors import AgentError, PolicyViolationError
 from atrium.core.types import ExecutionResult, NetworkMode, SandboxConfig
 from atrium.protocol import (
@@ -53,10 +57,14 @@ def _fixed_author(gen):
     return author
 
 
-def _slack_agent(author, **kwargs):
-    return SlackTaskAgent(
+def _task_agent(author, **kwargs):
+    return DelegatingTaskAgent(
         "task-1", "0.1.0", builder="http://builder.local", author=author, **kwargs
     )
+
+
+def _slack_gateway(downstream, **kwargs):
+    return SlackTaskAgent("slack-1", "0.1.0", downstream=downstream, **kwargs)
 
 
 def _script_builder(agent, replies):
@@ -96,10 +104,39 @@ def _builder_err(reason="kaniko build failed", logs="boom"):
     )
 
 
+def _task_result_ok(target="widget_agent", version="0.1.0", digest="sha256:abc"):
+    """What a downstream :class:`DelegatingTaskAgent` replies on success."""
+    return data_message(
+        {
+            "type": TASK_RESULT_TYPE,
+            "status": STATUS_OK,
+            "target_name": target,
+            "version": version,
+            "image": f"local-registry/{target}:{version}",
+            "digest": digest,
+            "image_ref": f"local-registry/{target}@{digest}",
+        },
+        role=Role.ROLE_AGENT,
+        metadata={"kind": "task", "status": STATUS_OK},
+    )
+
+
+def _task_result_err(reason="nope"):
+    return data_message(
+        {"type": TASK_RESULT_TYPE, "status": STATUS_ERROR, "reason": reason},
+        role=Role.ROLE_AGENT,
+        metadata={"kind": "task", "status": STATUS_ERROR},
+    )
+
+
 def _slack_request(text="<@U01BOT> build a widget"):
     return text_message(
         "", role=Role.ROLE_USER, extra_parts=[data_part({"event": {"text": text, "user": "U9", "channel": "C1"}})]
     )
+
+
+def _task_request(instruction="build a widget"):
+    return data_message({"instruction": instruction}, role=Role.ROLE_USER)
 
 
 # --------------------------------------------------------------------------- #
@@ -126,31 +163,30 @@ def test_build_payload_base64_wraps_bytes():
 # --------------------------------------------------------------------------- #
 # Security envelope                                                            #
 # --------------------------------------------------------------------------- #
-def test_default_envelope_is_wan_capable_no_socket():
-    agent = _slack_agent(_fixed_author(_gen()))
+def test_task_agent_envelope_is_wan_capable_no_socket():
+    agent = _task_agent(_fixed_author(_gen()))
     assert agent.sandbox_config.network is NetworkMode.BRIDGE
 
 
-def test_rejects_docker_socket():
+def test_task_agent_rejects_docker_socket():
     cfg = SandboxConfig(volumes={"/var/run/docker.sock": "/var/run/docker.sock"})
     with pytest.raises(PolicyViolationError):
-        _slack_agent(_fixed_author(_gen()), sandbox_config=cfg)
+        _task_agent(_fixed_author(_gen()), sandbox_config=cfg)
 
 
 # --------------------------------------------------------------------------- #
 # Happy path: author -> build -> success reply                                 #
 # --------------------------------------------------------------------------- #
 def test_handle_task_builds_and_replies_ok():
-    agent = _slack_agent(_fixed_author(_gen()))
+    agent = _task_agent(_fixed_author(_gen()))
     requests = _script_builder(agent, [_builder_ok()])
-    reply = asyncio.run(agent.dispatch(_slack_request()))
+    reply = asyncio.run(agent.dispatch(_task_request()))
 
     meta = metadata_dict(reply)
     assert meta["status"] == STATUS_OK
     payload = get_message_data(reply)[0]
     assert payload["digest"] == "sha256:abc"
     assert payload["target_name"] == "widget_agent"
-    # Slack-flavored text mentions the built generation.
     assert "widget_agent:0.1.0" in get_message_text(reply)
 
     # The outbound build request carries BuilderAgent's expected schema.
@@ -170,7 +206,7 @@ def test_retries_and_passes_last_outcome_to_author():
         seen.append((attempt, last_outcome))
         return _gen()
 
-    agent = _slack_agent(author)
+    agent = _task_agent(author)
     _script_builder(agent, [_builder_err(logs="syntax error"), _builder_ok()])
     outcome = asyncio.run(agent.build_generation({"instruction": "x"}))
 
@@ -182,16 +218,16 @@ def test_retries_and_passes_last_outcome_to_author():
 
 
 def test_gives_up_after_max_attempts():
-    agent = _slack_agent(_fixed_author(_gen()), max_build_attempts=2)
+    agent = _task_agent(_fixed_author(_gen()), max_build_attempts=2)
     _script_builder(agent, [_builder_err()])
     with pytest.raises(BuildFailedError, match="after 2 attempt"):
         asyncio.run(agent.build_generation({"instruction": "x"}))
 
 
 def test_handle_task_reports_failure_without_raising():
-    agent = _slack_agent(_fixed_author(_gen()), max_build_attempts=1)
+    agent = _task_agent(_fixed_author(_gen()), max_build_attempts=1)
     _script_builder(agent, [_builder_err(reason="nope")])
-    reply = asyncio.run(agent.dispatch(_slack_request()))
+    reply = asyncio.run(agent.dispatch(_task_request()))
     assert metadata_dict(reply)["status"] == STATUS_ERROR
     assert "nope" in get_message_data(reply)[0]["reason"]
 
@@ -200,12 +236,12 @@ def test_handle_task_reports_failure_without_raising():
 # Version decide                                                               #
 # --------------------------------------------------------------------------- #
 def test_version_defaults_to_initial_without_registry():
-    agent = _slack_agent(_fixed_author(_gen()))
+    agent = _task_agent(_fixed_author(_gen()))
     assert agent._decide_version(_gen()) == "0.1.0"
 
 
 def test_version_pin_is_respected():
-    agent = _slack_agent(_fixed_author(_gen()))
+    agent = _task_agent(_fixed_author(_gen()))
     assert agent._decide_version(_gen(version="2.5.0")) == "2.5.0"
 
 
@@ -220,13 +256,19 @@ def test_version_bumps_off_ledger(monkeypatch):
             return ["0.1.0", "0.2.0"]
 
     monkeypatch.setattr(agent_mod, "RegistryClient", StubClient)
-    agent = _slack_agent(_fixed_author(_gen()), registry_endpoint="127.0.0.1:5000")
+    agent = _task_agent(_fixed_author(_gen()), registry_endpoint="127.0.0.1:5000")
     assert agent._decide_version(_gen(version_bump="minor")) == "0.3.0"
     assert agent._decide_version(_gen(version_bump="patch")) == "0.2.1"
 
 
+def test_author_required_when_not_overridden():
+    agent = _task_agent(author=None)
+    with pytest.raises(AgentError, match="no code author"):
+        asyncio.run(agent.author_generation({"instruction": "x"}, attempt=1, last_outcome=None))
+
+
 # --------------------------------------------------------------------------- #
-# Slack normalization                                                          #
+# SlackTaskAgent gateway: Slack normalization (pure)                            #
 # --------------------------------------------------------------------------- #
 def test_normalize_strips_mention():
     task = SlackTaskAgent.normalize_slack({"event": {"text": "<@U01> do it", "user": "U9"}})
@@ -249,10 +291,78 @@ def test_normalize_rejects_empty():
         SlackTaskAgent.normalize_slack({"event": {"text": "<@U01>   "}})
 
 
-def test_author_required_when_not_overridden():
-    agent = _slack_agent(author=None)
-    with pytest.raises(AgentError, match="no code author"):
-        asyncio.run(agent.author_generation({"instruction": "x"}, attempt=1, last_outcome=None))
+# --------------------------------------------------------------------------- #
+# SlackTaskAgent gateway: envelope + forward + format                          #
+# --------------------------------------------------------------------------- #
+def test_gateway_envelope_is_wan_capable_no_socket():
+    agent = _slack_gateway("http://downstream.local")
+    assert agent.sandbox_config.network is NetworkMode.BRIDGE
+
+
+def test_gateway_rejects_docker_socket():
+    cfg = SandboxConfig(volumes={"/var/run/docker.sock": "/var/run/docker.sock"})
+    with pytest.raises(PolicyViolationError):
+        _slack_gateway("http://downstream.local", sandbox_config=cfg)
+
+
+def test_gateway_forwards_normalized_task_and_formats_ok():
+    agent = _slack_gateway("http://downstream.local")
+    captured: list = []
+
+    async def fake_send(target, message):
+        captured.append((target, message))
+        return _task_result_ok()
+
+    agent.send_a2a_message = fake_send  # type: ignore[assignment]
+    reply = asyncio.run(agent.dispatch(_slack_request()))
+
+    # It forwarded to the downstream target with the normalized task.
+    target, forwarded = captured[0]
+    assert target == "http://downstream.local"
+    assert get_message_text(forwarded) == "build a widget"
+    fwd_data = get_message_data(forwarded)[0]
+    assert fwd_data["instruction"] == "build a widget"
+    assert fwd_data["source"] == "slack"
+    assert fwd_data["user"] == "U9"
+
+    # The reply is Slack-flavored, and echoes the structured result.
+    assert metadata_dict(reply)["status"] == STATUS_OK
+    text = get_message_text(reply)
+    assert ":white_check_mark:" in text
+    assert "widget_agent:0.1.0" in text
+    assert get_message_data(reply)[0]["digest"] == "sha256:abc"
+
+
+def test_gateway_formats_downstream_error():
+    agent = _slack_gateway("http://downstream.local")
+
+    async def fake_send(target, message):
+        return _task_result_err(reason="kaniko exploded")
+
+    agent.send_a2a_message = fake_send  # type: ignore[assignment]
+    reply = asyncio.run(agent.dispatch(_slack_request()))
+
+    assert metadata_dict(reply)["status"] == STATUS_ERROR
+    text = get_message_text(reply)
+    assert ":x:" in text
+    assert "kaniko exploded" in text
+
+
+def test_gateway_end_to_end_through_delegating_task_agent():
+    """Slack → gateway → DelegatingTaskAgent → (scripted) builder, one chain."""
+    task_agent = _task_agent(_fixed_author(_gen()))
+    _script_builder(task_agent, [_builder_ok()])
+    gateway = _slack_gateway(task_agent)
+
+    async def route(target, message):
+        # Exactly what an A2A hop would deliver to the downstream's handler.
+        return await target.dispatch(message)
+
+    gateway.send_a2a_message = route  # type: ignore[assignment]
+    reply = asyncio.run(gateway.dispatch(_slack_request()))
+
+    assert metadata_dict(reply)["status"] == STATUS_OK
+    assert "widget_agent:0.1.0" in get_message_text(reply)
 
 
 # --------------------------------------------------------------------------- #
@@ -276,7 +386,7 @@ def test_roundtrip_against_real_builder_agent():
     builder.write_files_to_sandbox = fake_write  # type: ignore[assignment]
     builder.execute_in_sandbox = fake_exec  # type: ignore[assignment]
 
-    agent = _slack_agent(_fixed_author(_gen()))
+    agent = _task_agent(_fixed_author(_gen()))
 
     async def route_to_builder(target, message):
         # Exactly what an A2A hop would deliver to the builder's handler.

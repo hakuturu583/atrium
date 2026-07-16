@@ -21,6 +21,7 @@ __all__ = [
     "GPURequest",
     "ExecutionResult",
     "SandboxConfig",
+    "wan_sandbox_config",
 ]
 
 
@@ -158,3 +159,14 @@ class SandboxConfig:
             "network_policies: {}" + net_comment,
         ]
         return "\n".join(lines) + "\n"
+
+
+def wan_sandbox_config() -> SandboxConfig:
+    """A WAN-capable sandbox envelope (bridge network, not internal).
+
+    The shared default for agents that must reach an external service — a chat
+    app, the Prefect server, the builder — rather than staying WAN-isolated. The
+    Docker-socket refusal is a runtime guard (``BaseAgent.forbid_docker_socket``),
+    not part of this config.
+    """
+    return SandboxConfig(network=NetworkMode.BRIDGE, internal=False)

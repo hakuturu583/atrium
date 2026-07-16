@@ -13,9 +13,10 @@ that concrete subclasses only implement their domain logic:
 The type hierarchy is::
 
     BaseAgent (abstract)
-    ├── TaskAgent      → SlackTaskAgent, ...
-    ├── InferenceAgent → TabbyLLMAgent, ...
-    └── BuilderAgent
+    ├── TaskAgent       → DelegatingTaskAgent, ...
+    ├── InferenceAgent  → TabbyLLMAgent, ...
+    ├── BuilderAgent
+    └── SlackTaskAgent   (Slack I/O gateway; forwards to a TaskAgent over A2A)
 """
 
 from __future__ import annotations
