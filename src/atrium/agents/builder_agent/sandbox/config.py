@@ -40,7 +40,7 @@ def build_sandbox_config(
     version: str,
     *,
     registry: str = DEFAULT_REGISTRY,
-    memory: Optional[str] = "4g",
+    memory: Optional[str] = "4Gi",
     cpus: Optional[float] = 2.0,
 ) -> SandboxConfig:
     """Build the rootless, WAN-isolated, GPU-free SandboxConfig for ``version``.
