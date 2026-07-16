@@ -304,3 +304,167 @@ def test_executor_binds_token_and_cancel_signals_the_handler():
     queue = asyncio.run(scenario())
     assert seen == {"bound": True, "cancelled": True}
     assert len(queue.events) == 1  # handler still produced its reply
+
+
+# --------------------------------------------------------------------------- #
+# Review gate (scripted send — no network)                                     #
+# --------------------------------------------------------------------------- #
+from atrium.orchestration import ReviewPolicy, REVIEW_REQUEST_TYPE  # noqa: E402
+
+_REVIEWER = "reviewer.local"
+
+
+def _router(doer, reviewer, *, reviewer_target: str = _REVIEWER):
+    """A scripted send routing to a doer vs a reviewer reply fn by target.
+
+    Each reply fn receives ``(attempt_index, message)``; ``calls`` records the
+    dispatched messages per role so tests can assert what was sent.
+    """
+    calls: dict[str, list] = {"doer": [], "reviewer": []}
+
+    async def send(target, message):
+        if target == reviewer_target:
+            calls["reviewer"].append(message)
+            return reviewer(len(calls["reviewer"]), message)
+        calls["doer"].append(message)
+        return doer(len(calls["doer"]), message)
+
+    return send, calls
+
+
+def _ok_doer(_i, _m):
+    return board_update_message(NodeOutcome(status="ok"))
+
+
+def _policy(**kw):
+    return ReviewPolicy(reviewer=_REVIEWER, **kw)
+
+
+def test_review_approve_marks_node_done_and_records_verdict():
+    graft = WorkNode(id="child", agent="http://a.local")
+
+    def doer(_i, _m):
+        return board_update_message(NodeOutcome(status="ok"), add_subtasks=[graft])
+
+    def reviewer(_i, msg):
+        # the reviewer receives the deliverable as a review_request part
+        part = get_message_data(msg)[0]
+        assert part["type"] == REVIEW_REQUEST_TYPE
+        assert part["instruction"] == "do a"
+        return board_update_message(NodeOutcome(status="ok"))
+
+    send, calls = _router(doer, reviewer)
+    result = asyncio.run(run_node(_node("a"), send=send, review=_policy()))
+
+    assert result.ok
+    assert result.outcome.result["review"]["verdict"] == "approve"
+    assert result.outcome.result["review"]["attempts"] == 1
+    assert [s.id for s in result.add_subtasks] == ["child"]  # proposals graft on pass
+    assert len(calls["reviewer"]) == 1
+
+
+def test_review_reject_fails_node_and_drops_proposals():
+    graft = WorkNode(id="child", agent="http://a.local")
+
+    def doer(_i, _m):
+        return board_update_message(NodeOutcome(status="ok"), add_subtasks=[graft])
+
+    def reviewer(_i, _m):
+        return board_update_message(NodeOutcome(status="error", reason="missing tests"))
+
+    send, calls = _router(doer, reviewer)
+    result = asyncio.run(run_node(_node("a"), send=send, review=_policy(max_attempts=1)))
+
+    assert not result.ok
+    assert "review rejected" in result.outcome.reason
+    assert "missing tests" in result.outcome.reason
+    assert result.outcome.result["review"]["verdict"] == "request-changes"
+    assert result.add_subtasks == []  # rejected work must not mutate the DAG
+    assert len(calls["doer"]) == 1 and len(calls["reviewer"]) == 1
+
+
+def test_review_rework_retries_doer_with_feedback_then_approves():
+    def doer(_i, _m):
+        return board_update_message(NodeOutcome(status="ok"))
+
+    def reviewer(i, _m):
+        # reject the first attempt, approve the second
+        if i == 1:
+            return board_update_message(NodeOutcome(status="error", reason="rename foo"))
+        return board_update_message(NodeOutcome(status="ok"))
+
+    send, calls = _router(doer, reviewer)
+    result = asyncio.run(run_node(_node("a"), send=send, review=_policy(max_attempts=3)))
+
+    assert result.ok
+    assert result.outcome.result["review"]["attempts"] == 2
+    assert len(calls["doer"]) == 2 and len(calls["reviewer"]) == 2
+    # the 2nd doer dispatch carried the reviewer's feedback
+    second = get_message_data(calls["doer"][1])[0]
+    assert second["review_feedback"] == "rename foo"
+
+
+def test_review_exhausts_budget_then_fails():
+    def reviewer(_i, _m):
+        return board_update_message(NodeOutcome(status="error", reason="still broken"))
+
+    send, calls = _router(_ok_doer, reviewer)
+    result = asyncio.run(run_node(_node("a"), send=send, review=_policy(max_attempts=2)))
+
+    assert not result.ok
+    assert result.outcome.result["review"]["attempts"] == 2
+    assert len(calls["doer"]) == 2 and len(calls["reviewer"]) == 2
+
+
+def test_non_reviewable_node_skips_the_gate():
+    node = WorkNode(id="a", agent="http://a.local", instruction="do a", reviewable=False)
+
+    def reviewer(_i, _m):  # pragma: no cover - must never be called
+        raise AssertionError("reviewer dispatched for a non-reviewable node")
+
+    send, calls = _router(_ok_doer, reviewer)
+    result = asyncio.run(run_node(node, send=send, review=_policy()))
+
+    assert result.ok and calls["reviewer"] == []
+
+
+def test_no_policy_keeps_self_report_behavior():
+    def reviewer(_i, _m):  # pragma: no cover - must never be called
+        raise AssertionError("reviewer dispatched without a policy")
+
+    send, calls = _router(_ok_doer, reviewer)
+    result = asyncio.run(run_node(_node("a"), send=send))  # review=None
+
+    assert result.ok and calls["reviewer"] == []
+
+
+def test_doer_self_failure_skips_the_gate():
+    def doer(_i, _m):
+        return board_update_message(NodeOutcome(status="error", reason="boom"))
+
+    def reviewer(_i, _m):  # pragma: no cover - must never be called
+        raise AssertionError("reviewer dispatched for a self-failed doer")
+
+    send, calls = _router(doer, reviewer)
+    result = asyncio.run(run_node(_node("a"), send=send, review=_policy()))
+
+    assert not result.ok and result.outcome.reason == "boom"
+    assert calls["reviewer"] == []
+
+
+def test_per_node_reviewer_overrides_policy_target():
+    node = WorkNode(id="a", agent="http://a.local", instruction="do a", reviewer="special.local")
+
+    def reviewer(_i, _m):
+        return board_update_message(NodeOutcome(status="ok"))
+
+    send, calls = _router(_ok_doer, reviewer, reviewer_target="special.local")
+    result = asyncio.run(run_node(node, send=send, review=_policy()))
+
+    assert result.ok and len(calls["reviewer"]) == 1
+
+
+def test_review_policy_roundtrips_through_dict():
+    p = _policy(max_attempts=3, review_kind="audit")
+    assert ReviewPolicy.from_dict(p.to_dict()) == p
+    assert ReviewPolicy.from_dict(None) is None

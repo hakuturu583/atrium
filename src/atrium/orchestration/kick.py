@@ -24,6 +24,7 @@ from prefect.client.orchestration import get_client
 from prefect.deployments import run_deployment
 
 from atrium.orchestration.flow import WORKBOARD_FLOW_NAME, build_workboard_flow
+from atrium.orchestration.review import ReviewPolicy
 from atrium.orchestration.types import Workboard
 
 logger = logging.getLogger("atrium.orchestration.kick")
@@ -39,6 +40,7 @@ async def submit_job(
     job_id: Optional[str] = None,
     deployment: str = "default",
     context_id: Optional[str] = None,
+    review: Optional[ReviewPolicy] = None,
 ) -> str:
     """Submit a single-agent job and return its flow-run id.
 
@@ -46,12 +48,15 @@ async def submit_job(
     one-node workboard (:meth:`Workboard.single`) and kicks it through the same
     path as any DAG, so a trivial job is server-tracked and UI-visible like the
     rest. For multi-step jobs, build a :class:`Workboard` and use
-    :func:`submit_workboard`.
+    :func:`submit_workboard`. Pass ``review`` (a :class:`ReviewPolicy`) to gate the
+    job's completion behind an independent reviewer.
     """
     workboard = Workboard.single(
         agent, instruction, id=job_id or f"job-{uuid.uuid4().hex[:12]}", payload=payload
     )
-    return await submit_workboard(workboard, deployment=deployment, context_id=context_id)
+    return await submit_workboard(
+        workboard, deployment=deployment, context_id=context_id, review=review
+    )
 
 
 async def submit_workboard(
@@ -59,17 +64,26 @@ async def submit_workboard(
     *,
     deployment: str = "default",
     context_id: Optional[str] = None,
+    review: Optional[ReviewPolicy] = None,
 ) -> str:
     """Create a server-tracked run of ``workboard`` and return its flow-run id.
 
     Targets the deployment ``atrium-workboard/<deployment>`` served by the worker
     (:func:`atrium.orchestration.flow.serve_workboards`). Returns immediately
     after scheduling; poll :func:`workboard_state` for progress or watch the UI.
+
+    ``review`` gates every :attr:`~WorkNode.reviewable` node's completion behind an
+    independent reviewer; when omitted the worker still applies its deployment
+    default (``ATRIUM_REVIEWER``), so the gate can be always-on by configuration.
     """
     workboard.validate()
     run = await run_deployment(
         name=f"{WORKBOARD_FLOW_NAME}/{deployment}",
-        parameters={"workboard": workboard.to_dict(), "context_id": context_id},
+        parameters={
+            "workboard": workboard.to_dict(),
+            "context_id": context_id,
+            "review": review.to_dict() if review else None,
+        },
         timeout=0,  # fire-and-forget: return the scheduled run, don't await it
     )
     logger.info("submitted workboard %s as flow run %s", workboard.id, run.id)
@@ -90,13 +104,21 @@ async def workboard_state(flow_run_id: str) -> dict[str, Any]:
 
 
 async def run_workboard_local(
-    workboard: Workboard, *, context_id: Optional[str] = None
+    workboard: Workboard,
+    *,
+    context_id: Optional[str] = None,
+    review: Optional[ReviewPolicy] = None,
 ) -> dict[str, Any]:
     """Run ``workboard`` to completion in-process and return the flow result.
 
     No Prefect server required — the flow executes locally (still recorded by any
-    configured Prefect backend). Handy for a smoke run of a DAG end to end.
+    configured Prefect backend). Handy for a smoke run of a DAG end to end. Pass
+    ``review`` to exercise the review gate locally.
     """
     workboard.validate()
     flow = build_workboard_flow()
-    return await flow(workboard.to_dict(), context_id=context_id)
+    return await flow(
+        workboard.to_dict(),
+        context_id=context_id,
+        review=review.to_dict() if review else None,
+    )

@@ -55,6 +55,12 @@ from atrium.orchestration.protocol import (
     build_node_request,
     extract_board_update,
 )
+from atrium.orchestration.review import (
+    REVIEW_REQUEST_TYPE,
+    ReviewPolicy,
+    build_review_request,
+    default_review_policy,
+)
 from atrium.orchestration.runner import run_node
 from atrium.orchestration.scheduler import WorkboardScheduler
 from atrium.orchestration.types import (
@@ -83,6 +89,11 @@ __all__ = [
     "build_node_request",
     "extract_board_update",
     "board_update_message",
+    # Review gate
+    "REVIEW_REQUEST_TYPE",
+    "ReviewPolicy",
+    "build_review_request",
+    "default_review_policy",
     # Execution
     "run_node",
     "WorkboardScheduler",
