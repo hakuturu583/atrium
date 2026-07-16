@@ -17,10 +17,11 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
+from atrium.agents.builder_agent.agent import STATUS_ERROR, STATUS_OK
 from atrium.agents.task_agent.agent import DEFAULT_INITIAL_VERSION, TASK_RESULT_TYPE
 from atrium.core.base_agent import BaseAgent
 from atrium.core.errors import AgentError
-from atrium.core.types import NetworkMode, SandboxConfig, VersionTag
+from atrium.core.types import SandboxConfig, VersionTag, wan_sandbox_config
 from atrium.protocol import (
     Message,
     Role,
@@ -31,10 +32,6 @@ from atrium.protocol import (
 from atrium.protocol.a2a_transport import SendTarget
 
 __all__ = ["SlackTaskAgent"]
-
-#: Node/result statuses on the task protocol (match the rest of the runtime).
-STATUS_OK = "ok"
-STATUS_ERROR = "error"
 
 #: Leading Slack bot mention, e.g. ``<@U0123ABCD> build me a foo`` -> ``build me a foo``.
 _MENTION_RE = re.compile(r"^\s*<@[A-Z0-9]+>\s*")
@@ -53,7 +50,7 @@ class SlackTaskAgent(BaseAgent):
         downstream: SendTarget,
         sandbox_config: "SandboxConfig | None" = None,
     ) -> None:
-        super().__init__(agent_id, version or DEFAULT_INITIAL_VERSION, sandbox_config or _slack_defaults())
+        super().__init__(agent_id, version or DEFAULT_INITIAL_VERSION, sandbox_config or wan_sandbox_config())
         #: A2A target that actually handles the task (author → build). Any agent
         #: speaking the task protocol (a ``task_result`` reply) works here.
         self.downstream = downstream
@@ -165,8 +162,3 @@ class SlackTaskAgent(BaseAgent):
 
     def format_error(self, task: Mapping[str, Any], reason: str) -> str:
         return f":x: Couldn't build that: {reason}"
-
-
-def _slack_defaults() -> SandboxConfig:
-    """Default gateway sandbox envelope: WAN-capable (reach Slack), no Docker socket."""
-    return SandboxConfig(network=NetworkMode.BRIDGE, internal=False)

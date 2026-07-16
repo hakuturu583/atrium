@@ -39,7 +39,7 @@ from atrium.core import telemetry as tel
 from atrium.core.base_agent import BaseAgent
 from atrium.core.errors import AgentError
 from atrium.core.registry import LocalRegistryError, RegistryClient, next_version
-from atrium.core.types import NetworkMode, SandboxConfig, VersionTag
+from atrium.core.types import SandboxConfig, VersionTag, wan_sandbox_config
 from atrium.protocol import (
     Message,
     Role,
@@ -173,7 +173,7 @@ class TaskAgent(BaseAgent, abc.ABC):
         registry_endpoint: Optional[str] = None,
         max_build_attempts: int = 3,
     ) -> None:
-        super().__init__(agent_id, version or DEFAULT_INITIAL_VERSION, sandbox_config or _task_defaults())
+        super().__init__(agent_id, version or DEFAULT_INITIAL_VERSION, sandbox_config or wan_sandbox_config())
         self.builder = builder
         self.registry_endpoint = registry_endpoint
         self.max_build_attempts = max(1, max_build_attempts)
@@ -442,8 +442,3 @@ class DelegatingTaskAgent(TaskAgent):
                 "author=... or override author_generation()"
             )
         return await self._author(task, attempt, last_outcome)
-
-
-def _task_defaults() -> SandboxConfig:
-    """Default TaskAgent sandbox envelope: WAN-capable (reach the builder), no Docker socket."""
-    return SandboxConfig(network=NetworkMode.BRIDGE, internal=False)

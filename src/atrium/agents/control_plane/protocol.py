@@ -78,6 +78,28 @@ class SubmitRequest:
     feedback_for: Optional[str] = None
 
 
+def _envelope(
+    text: str,
+    *,
+    role: "Role",
+    kind: str,
+    data: dict[str, Any],
+    context_id: Optional[str] = None,
+    status: Optional[str] = None,
+) -> Message:
+    """A text-summary message carrying one structured ``data`` part.
+
+    The shared shape of every message on this contract: a human-readable summary
+    plus a typed data part, tagged with a ``metadata.kind`` (and optional
+    ``status``). Centralizes the ``text_message(..., extra_parts=[data_part(...)])``
+    scaffolding the three builders would otherwise repeat.
+    """
+    metadata = {"kind": kind} if status is None else {"kind": kind, "status": status}
+    return text_message(
+        text, role=role, context_id=context_id, metadata=metadata, extra_parts=[data_part(data)]
+    )
+
+
 def build_submit_request(
     agent: str,
     instruction: str = "",
@@ -103,13 +125,7 @@ def build_submit_request(
         body["review"] = review
     if feedback_for is not None:
         body["feedback_for"] = feedback_for
-    return text_message(
-        instruction,
-        role=Role.ROLE_USER,
-        context_id=context_id,
-        metadata={"kind": KIND_SUBMIT},
-        extra_parts=[data_part(body)],
-    )
+    return _envelope(instruction, role=Role.ROLE_USER, kind=KIND_SUBMIT, data=body, context_id=context_id)
 
 
 def parse_submit_request(message: Message) -> SubmitRequest:
@@ -145,12 +161,13 @@ def build_submitted_reply(
     job_id: str, *, request: Optional[Message] = None, status: str = "ok"
 ) -> Message:
     """Build the control-plane ack: the scheduled flow-run id (or an error)."""
-    return text_message(
+    return _envelope(
         f"submitted job {job_id}" if status == "ok" else f"submit failed: {job_id}",
         role=Role.ROLE_AGENT,
-        context_id=(request.context_id or None) if request is not None else None,
-        metadata={"kind": KIND_SUBMIT, "status": status},
-        extra_parts=[data_part({"type": SUBMITTED_TYPE, "status": status, "job_id": job_id})],
+        kind=KIND_SUBMIT,
+        status=status,
+        data={"type": SUBMITTED_TYPE, "status": status, "job_id": job_id},
+        context_id=request.context_id if request else None,
     )
 
 
@@ -167,19 +184,16 @@ def build_job_update(
     the interface uses to :meth:`deliver` into the right thread without a local
     session lookup.
     """
-    return text_message(
+    return _envelope(
         f"job {job_id} {status}",
         role=Role.ROLE_AGENT,
-        metadata={"kind": KIND_UPDATE, "status": status},
-        extra_parts=[
-            data_part(
-                {
-                    "type": JOB_UPDATE_TYPE,
-                    "job_id": job_id,
-                    "status": status,
-                    "coords": dict(coords or {}),
-                    "result": dict(result or {}),
-                }
-            )
-        ],
+        kind=KIND_UPDATE,
+        status=status,
+        data={
+            "type": JOB_UPDATE_TYPE,
+            "job_id": job_id,
+            "status": status,
+            "coords": dict(coords or {}),
+            "result": dict(result or {}),
+        },
     )

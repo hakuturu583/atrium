@@ -29,7 +29,7 @@ from atrium.agents.control_plane.protocol import (
     parse_submit_request,
 )
 from atrium.core.base_agent import BaseAgent
-from atrium.core.types import NetworkMode, SandboxConfig, VersionTag
+from atrium.core.types import SandboxConfig, VersionTag, wan_sandbox_config
 from atrium.orchestration.kick import submit_job
 from atrium.orchestration.review import ReviewPolicy
 from atrium.protocol import Message
@@ -56,7 +56,7 @@ class ControlPlaneAgent(BaseAgent):
         sandbox_config: Optional[SandboxConfig] = None,
     ) -> None:
         super().__init__(
-            agent_id, version or DEFAULT_INITIAL_VERSION, sandbox_config or _control_plane_defaults()
+            agent_id, version or DEFAULT_INITIAL_VERSION, sandbox_config or wan_sandbox_config()
         )
         #: Which ``atrium-workboard/<deployment>`` a kick targets.
         self.deployment = deployment
@@ -88,8 +88,3 @@ class ControlPlaneAgent(BaseAgent):
             review=ReviewPolicy.from_dict(req.review),
             deployment=self.deployment,
         )
-
-
-def _control_plane_defaults() -> SandboxConfig:
-    """Trusted host-side envelope: WAN-capable (reach the Prefect server)."""
-    return SandboxConfig(network=NetworkMode.BRIDGE, internal=False)
