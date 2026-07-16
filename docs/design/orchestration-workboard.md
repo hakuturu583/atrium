@@ -102,6 +102,35 @@ Any existing agent is a valid node with **no changes**: if it doesn't speak the
 `workboard_update` protocol, `extract_board_update` falls back to its reply
 `status` (e.g. a `TaskAgent`'s `task_result`) and treats it as a leaf outcome.
 
+## The review gate (完了はレビュー通過)
+By default a node's "achieved" verdict is the **doer's own self-report** — but a
+code-authoring agent is the highest prompt-injection-exposure component in the
+system, so a run can require every node's completion to pass an **independent
+reviewer** first (`atrium.orchestration.review`). The gate lives inside the
+trusted `run_node`, so it is structurally unavoidable — not something a DAG author
+opts a node into:
+
+1. the doer produces a deliverable (reply `ok`);
+2. `run_node` dispatches that deliverable — task + artifact only, **never the
+   doer's context** — to the reviewer agent (`ReviewPolicy.reviewer`);
+3. the reviewer replies with a verdict (`workboard_update` `ok`/`error`), which
+   **becomes the node's outcome** — the doer's self-report no longer decides;
+4. on `request-changes`, if the rework budget (`max_attempts`) allows, the doer is
+   re-dispatched with the reviewer's feedback (`payload.review_feedback`) and
+   re-reviewed; otherwise the node **fails** and its dependents skip.
+
+This is the same **"agent proposes, trusted worker disposes"** invariant: the
+reviewer holds no board access and only *proposes* a verdict; `run_node` (trusted)
+writes it. A rejected node grafts **none** of the doer's proposed subtasks/cancels
+(unreviewed work must not mutate the DAG). The verdict + attempt count are recorded
+on the node outcome (`result.review`) and as `workboard.review.*` span attributes.
+The gate is opt-in per run (`submit_job(..., review=ReviewPolicy(...))`) or
+always-on by deployment (`ATRIUM_REVIEWER` env, via `default_review_policy`); a
+node with no reviewable deliverable sets `reviewable=False` to bypass it. The
+reviewer itself is an evolvable agent (`atrium_agents.ReviewerAgent`) that renders
+the `review_request` through the `reviewer` prompt profile and parses the model's
+`VERDICT:` line — the control plane stays model-agnostic.
+
 ## Kicking a run ("API経由でキック")
 Prefect is *the* job-execution entry point — every top-level job runs as a
 workboard, so there is one submission path, not a "single call vs DAG" split:

@@ -54,6 +54,13 @@ class WorkNode:
     depends_on: list[str] = field(default_factory=list)
     #: A2A ``kind`` stamped on the request metadata (routing hint for the agent).
     kind: str = "task"
+    #: Whether this node's completion must pass the review gate (see
+    #: :mod:`atrium.orchestration.review`). Set False for a node with no reviewable
+    #: deliverable (e.g. a pure fetch/setup step); it then completes on self-report.
+    reviewable: bool = True
+    #: Optional per-node reviewer A2A target, overriding the run's
+    #: :attr:`ReviewPolicy.reviewer` for this node.
+    reviewer: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -63,10 +70,13 @@ class WorkNode:
             "payload": dict(self.payload),
             "depends_on": list(self.depends_on),
             "kind": self.kind,
+            "reviewable": self.reviewable,
+            "reviewer": self.reviewer,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "WorkNode":
+        reviewer = data.get("reviewer")
         return cls(
             id=str(data["id"]),
             agent=str(data["agent"]),
@@ -74,6 +84,8 @@ class WorkNode:
             payload=dict(data.get("payload") or {}),
             depends_on=[str(d) for d in (data.get("depends_on") or [])],
             kind=str(data.get("kind", "task")),
+            reviewable=bool(data.get("reviewable", True)),
+            reviewer=str(reviewer) if reviewer else None,
         )
 
 

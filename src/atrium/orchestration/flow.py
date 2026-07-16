@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from prefect import flow, task
 
+from atrium.orchestration.review import ReviewPolicy, default_review_policy
 from atrium.orchestration.runner import run_node
 from atrium.orchestration.scheduler import WorkboardScheduler
 from atrium.orchestration.types import (
@@ -47,19 +48,34 @@ def build_workboard_flow() -> Any:
 
     @task(task_run_name="node:{node_dict[id]}")
     async def _node_task(
-        node_dict: dict[str, Any], workboard_id: str, context_id: Optional[str]
+        node_dict: dict[str, Any],
+        workboard_id: str,
+        context_id: Optional[str],
+        review_dict: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        """Run one node over A2A; its Prefect state reflects the node's fate."""
+        """Run one node over A2A (review-gated); its Prefect state reflects the fate."""
         node = WorkNode.from_dict(node_dict)
-        result = await run_node(node, workboard_id=workboard_id, context_id=context_id)
+        result = await run_node(
+            node,
+            workboard_id=workboard_id,
+            context_id=context_id,
+            review=ReviewPolicy.from_dict(review_dict),
+        )
         return result.to_dict()
 
     @flow(name=WORKBOARD_FLOW_NAME)
     async def workboard_flow(
-        workboard: dict[str, Any], context_id: Optional[str] = None
+        workboard: dict[str, Any],
+        context_id: Optional[str] = None,
+        review: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         wb = Workboard.from_dict(workboard)
         sched = WorkboardScheduler(wb)
+
+        # Explicit per-run policy wins; otherwise fall back to the deployment
+        # default (``ATRIUM_REVIEWER`` env) so the gate can be always-on.
+        policy = ReviewPolicy.from_dict(review) or default_review_policy()
+        review_dict = policy.to_dict() if policy else None
 
         waves = 0
         while not sched.finished and waves < _MAX_WAVES:
@@ -70,7 +86,7 @@ def build_workboard_flow() -> Any:
                 break
             waves += 1
             futures = {
-                node.id: _node_task.submit(node.to_dict(), wb.id, context_id)
+                node.id: _node_task.submit(node.to_dict(), wb.id, context_id, review_dict)
                 for node in wave
             }
             for node_id, future in futures.items():
