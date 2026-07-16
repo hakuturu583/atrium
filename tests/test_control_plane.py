@@ -162,6 +162,80 @@ def test_unroutable_when_no_agent_and_no_default(monkeypatch):
     assert metadata_dict(reply)["status"] == "error"
 
 
+# --------------------------------------------------------------------------- #
+# D6 — progress notifications (poll → push job_update)                          #
+# --------------------------------------------------------------------------- #
+def _capture_pushes(agent):
+    pushed: list = []
+
+    async def fake_send(target, message):
+        pushed.append((target, message))
+        return message
+
+    agent.send_a2a_message = fake_send  # type: ignore[assignment]
+    return pushed
+
+
+def _submit(agent, monkeypatch, *, job_id, coords):
+    _script_kick(monkeypatch, job_id=job_id)
+    msg = build_submit_request(
+        "widget_agent:active", "x", context_id="slack:C1:9", payload={"reply_coords": coords}
+    )
+    asyncio.run(agent.dispatch(msg))
+
+
+def test_submit_tracks_reply_coords(monkeypatch):
+    agent = _agent()
+    _submit(agent, monkeypatch, job_id="j1", coords={"channel": "C1", "thread": "9"})
+    assert agent._pending["j1"] == {"channel": "C1", "thread": "9"}
+
+
+def test_poll_pushes_job_update_when_done(monkeypatch):
+    agent = _agent(interface="http://interface.local")
+    _submit(agent, monkeypatch, job_id="j1", coords={"channel": "C1", "thread": "9"})
+    pushed = _capture_pushes(agent)
+
+    async def fake_state(job_id):
+        return {"id": job_id, "state": "COMPLETED", "done": True}
+
+    monkeypatch.setattr("atrium.agents.control_plane.agent.workboard_state", fake_state)
+    notified = asyncio.run(agent.poll_once())
+
+    assert notified == ["j1"]
+    target, msg = pushed[0]
+    assert target == "http://interface.local"
+    upd = parse_job_update(msg)
+    assert upd["job_id"] == "j1" and upd["status"] == "ok"
+    assert upd["coords"] == {"channel": "C1", "thread": "9"}
+    assert "j1" not in agent._pending  # stopped tracking
+
+
+def test_poll_skips_unfinished_jobs(monkeypatch):
+    agent = _agent(interface="http://interface.local")
+    _submit(agent, monkeypatch, job_id="j1", coords={})
+    pushed = _capture_pushes(agent)
+
+    async def fake_state(job_id):
+        return {"id": job_id, "state": "RUNNING", "done": False}
+
+    monkeypatch.setattr("atrium.agents.control_plane.agent.workboard_state", fake_state)
+    assert asyncio.run(agent.poll_once()) == []
+    assert pushed == [] and "j1" in agent._pending
+
+
+def test_failed_job_pushes_error_status(monkeypatch):
+    agent = _agent(interface="http://interface.local")
+    _submit(agent, monkeypatch, job_id="j1", coords={})
+    pushed = _capture_pushes(agent)
+
+    async def fake_state(job_id):
+        return {"id": job_id, "state": "FAILED", "done": True}
+
+    monkeypatch.setattr("atrium.agents.control_plane.agent.workboard_state", fake_state)
+    asyncio.run(agent.poll_once())
+    assert parse_job_update(pushed[0][1])["status"] == "error"
+
+
 def test_feedback_relay_is_refused_not_submitted(monkeypatch):
     calls = _script_kick(monkeypatch)
     agent = _agent()
