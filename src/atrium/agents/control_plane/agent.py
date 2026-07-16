@@ -41,6 +41,10 @@ __all__ = ["ControlPlaneAgent"]
 #: First version minted for the control plane with no ledger history.
 DEFAULT_INITIAL_VERSION = "0.1.0"
 
+#: Doer used when a submit names no explicit agent (D5 — the interface forwards a
+#: turn and the control plane routes; a coding turn defaults to a code workspace).
+DEFAULT_DOER = "python_code_workspace_agent:active"
+
 
 class ControlPlaneAgent(BaseAgent):
     """Receive ``workboard.submit`` and kick a workboard run over Prefect."""
@@ -53,6 +57,7 @@ class ControlPlaneAgent(BaseAgent):
         version: "str | VersionTag | None" = None,
         *,
         deployment: str = "default",
+        default_agent: str = DEFAULT_DOER,
         sandbox_config: Optional[SandboxConfig] = None,
     ) -> None:
         super().__init__(
@@ -60,6 +65,8 @@ class ControlPlaneAgent(BaseAgent):
         )
         #: Which ``atrium-workboard/<deployment>`` a kick targets.
         self.deployment = deployment
+        #: The doer a turn routes to when it names no explicit agent override.
+        self.default_agent = default_agent
 
     async def handle_task(self, message: Message) -> Message:
         """Validate the submit and kick a run; reply with the flow-run id."""
@@ -74,14 +81,27 @@ class ControlPlaneAgent(BaseAgent):
                 request=message,
                 status="error",
             )
-        job_id = await self._kick(req)
-        logger.info("kicked job %s for context %s", job_id, req.context_id)
+        target = self._route(req)
+        if not target:
+            return build_submitted_reply("no doer agent and no default configured", request=message, status="error")
+        job_id = await self._kick(req, target)
+        logger.info("kicked job %s (doer %s) for context %s", job_id, target, req.context_id)
         return build_submitted_reply(job_id, request=message)
 
-    async def _kick(self, req: SubmitRequest) -> str:
+    def _route(self, req: SubmitRequest) -> str:
+        """Pick the doer for ``req``: its explicit override, else the default (D5).
+
+        Routing is the control plane's job, not the interface's: a turn may carry
+        an explicit ``@agent`` override (``req.agent``), otherwise it routes to
+        :attr:`default_agent`. A richer intent/capability router slots in here
+        behind the same seam without touching the interface.
+        """
+        return req.agent or self.default_agent
+
+    async def _kick(self, req: SubmitRequest, target: str) -> str:
         """Kick a single-node workboard for ``req`` and return its flow-run id."""
         return await submit_job(
-            req.agent,
+            target,
             req.instruction,
             payload=req.payload,
             context_id=req.context_id,

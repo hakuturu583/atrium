@@ -63,10 +63,11 @@ def test_submit_request_roundtrip():
     assert req.feedback_for is None
 
 
-def test_parse_rejects_missing_agent():
-    msg = build_submit_request("", "do a thing")
-    with pytest.raises(ValueError, match="no doer agent"):
-        parse_submit_request(msg)
+def test_parse_allows_missing_agent():
+    # An agent-less turn is valid: the control plane routes it (D5).
+    req = parse_submit_request(build_submit_request("", "do a thing"))
+    assert req.agent == ""
+    assert req.instruction == "do a thing"
 
 
 def test_parse_falls_back_to_message_text_for_instruction():
@@ -127,6 +128,35 @@ def test_no_review_means_no_policy(monkeypatch):
     msg = build_submit_request("widget_agent:active", "x", context_id="slack:C1:7")
     asyncio.run(agent.dispatch(msg))
     assert calls[0]["review"] is None
+
+
+# --------------------------------------------------------------------------- #
+# D5 — target-agent routing                                                    #
+# --------------------------------------------------------------------------- #
+def test_agentless_turn_routes_to_default(monkeypatch):
+    calls = _script_kick(monkeypatch)
+    agent = _agent(default_agent="python_code_workspace_agent:active")
+    # A turn with no explicit doer — the control plane picks the default.
+    msg = build_submit_request("", "write hello world", context_id="slack:C1:9")
+    asyncio.run(agent.dispatch(msg))
+    assert calls[0]["agent"] == "python_code_workspace_agent:active"
+
+
+def test_explicit_agent_overrides_default(monkeypatch):
+    calls = _script_kick(monkeypatch)
+    agent = _agent(default_agent="python_code_workspace_agent:active")
+    msg = build_submit_request("widget_agent:active", "x", context_id="slack:C1:9")
+    asyncio.run(agent.dispatch(msg))
+    assert calls[0]["agent"] == "widget_agent:active"
+
+
+def test_unroutable_when_no_agent_and_no_default(monkeypatch):
+    calls = _script_kick(monkeypatch)
+    agent = _agent(default_agent="")
+    msg = build_submit_request("", "x", context_id="slack:C1:9")
+    reply = asyncio.run(agent.dispatch(msg))
+    assert calls == []
+    assert metadata_dict(reply)["status"] == "error"
 
 
 def test_feedback_relay_is_refused_not_submitted(monkeypatch):

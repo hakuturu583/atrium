@@ -235,7 +235,7 @@ already exist.
 ```jsonc
 // interface → control plane   metadata.kind = "workboard.submit"
 { "type": "workboard_submit",
-  "agent": "python_code_workspace_agent:active",   // who should do the work
+  "agent": "",                                     // optional @override; empty ⇒ control plane routes (D5)
   "instruction": "<normalized turn text>",
   "context_id": "slack:C1:1699999999.000100",
   "payload": {
@@ -273,7 +273,7 @@ already exist.
 | `InterfaceAgent` base + `Turn` + `SessionStore` | **DESIGN** |
 | `SlackInterfaceAgent` (rename + move to `atrium_agents`) | **DESIGN** |
 | `ControlPlaneAgent` + shared submit/update contract (core) | **DONE (core)** — `atrium.agents.control_plane`, unit-tested; submit path kicks `submit_job`, feedback-relay refused pending 動線2(b) |
-| Target-agent routing in the control plane (D5) | **DESIGN** (default + `@agent` override first) |
+| Target-agent routing in the control plane (D5) | **DONE (core)** — `ControlPlaneAgent._route`: explicit `@agent` override else `default_agent`; `agent` now optional in the contract, unit-tested |
 | Progress `job_update` push, fallback poll (D6) | **DESIGN** (`build_job_update` seam already in the contract) |
 | 動線2(b) human review — control-plane-brokered via `feedback_for` (no Slack reviewer agent) | **DESIGN** (reviewer-waiting model open) |
 | `orchestration` core changes | **NONE NEEDED** (rides existing seams) |

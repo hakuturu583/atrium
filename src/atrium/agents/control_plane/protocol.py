@@ -61,7 +61,9 @@ JOB_UPDATE_TYPE = "job_update"
 class SubmitRequest:
     """A human turn, normalized by the interface, asking the board to do work.
 
-    ``agent`` is the doer target (a slug or A2A URL). ``instruction`` is the
+    ``agent`` is an *optional explicit doer override* (a slug or A2A URL); when
+    empty the control plane routes to its default (D5 — the interface forwards a
+    turn, the control plane picks the doer). ``instruction`` is the
     natural-language ask. ``context_id`` ties the whole chat thread together
     (``f"{source}:{channel}:{thread}"``). ``payload`` carries ride-along reply
     coords and any submit-time ``steering``. ``review`` is an optional
@@ -70,7 +72,7 @@ class SubmitRequest:
     than a new job (the mid-flight rework path).
     """
 
-    agent: str
+    agent: str = ""
     instruction: str = ""
     context_id: Optional[str] = None
     payload: dict[str, Any] = field(default_factory=dict)
@@ -101,7 +103,7 @@ def _envelope(
 
 
 def build_submit_request(
-    agent: str,
+    agent: str = "",
     instruction: str = "",
     *,
     context_id: Optional[str] = None,
@@ -132,8 +134,8 @@ def parse_submit_request(message: Message) -> SubmitRequest:
     """Read a ``workboard.submit`` message back into a :class:`SubmitRequest`.
 
     Prefers the :data:`SUBMIT_TYPE` data part; falls back to the message text for
-    the instruction so a bare text ask still resolves. Raises :class:`ValueError`
-    when no doer ``agent`` is present (an unroutable request).
+    the instruction so a bare text ask still resolves. ``agent`` is optional — an
+    empty value means "let the control plane route" (D5), not an error.
     """
     part: dict[str, Any] = {}
     for candidate in get_message_data(message):
@@ -143,8 +145,6 @@ def parse_submit_request(message: Message) -> SubmitRequest:
         part = part or candidate  # tolerate a bare data part without the tag
 
     agent = str(part.get("agent") or "").strip()
-    if not agent:
-        raise ValueError("workboard.submit carried no doer agent")
     instruction = str(part.get("instruction") or get_message_text(message) or "")
     context_id = part.get("context_id") or (message.context_id or None)
     return SubmitRequest(
