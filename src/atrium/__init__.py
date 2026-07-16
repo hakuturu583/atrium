@@ -23,6 +23,7 @@ from __future__ import annotations
 from atrium.agents.builder_agent import BuilderAgent
 from atrium.agents.task_agent import (
     BuildOutcome,
+    DelegatingTaskAgent,
     GenerationRequest,
     SlackTaskAgent,
     TaskAgent,
@@ -59,6 +60,7 @@ __all__ = [
     "BaseAgent",
     "BuilderAgent",
     "TaskAgent",
+    "DelegatingTaskAgent",
     "SlackTaskAgent",
     "GenerationRequest",
     "BuildOutcome",
@@ -86,4 +88,5 @@ __all__ = [
 # (create_agent_by_slug) once the registry has an active generation for them. The
 # evolvable agents register themselves from the `atrium_agents` package.
 register_agent_type(BuilderAgent)
+register_agent_type(DelegatingTaskAgent)
 register_agent_type(SlackTaskAgent)

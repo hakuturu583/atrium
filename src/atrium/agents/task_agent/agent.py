@@ -13,9 +13,12 @@ fixed-infrastructure :class:`~atrium.core.morpher.Morpher` promotes it after a
 signed validation. So this class deliberately stops at "a new version was built":
 it never moves ``<slug>:active``. See ``docs/design/agent-versioning.md``.
 
-The inheritance chain is preserved::
+The inheritance chain::
 
-    BaseAgent → TaskAgent → SlackTaskAgent, ...
+    BaseAgent → TaskAgent → DelegatingTaskAgent, ...
+
+Channel adapters (e.g. the Slack gateway) do *not* subclass ``TaskAgent``; they
+forward normalized tasks to a concrete one over A2A.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import abc
 import base64
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Union
+from typing import Any, Awaitable, Callable, Mapping, Optional, Union
 
 from atrium.agents.builder_agent.agent import (
     KIND_BUILD,
@@ -50,6 +53,8 @@ logger = logging.getLogger("atrium.agents.task")
 
 __all__ = [
     "TaskAgent",
+    "DelegatingTaskAgent",
+    "CodeAuthor",
     "GenerationRequest",
     "BuildOutcome",
     "BuildFailedError",
@@ -124,6 +129,15 @@ class BuildOutcome:
     reason: Optional[str] = None
     logs: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+#: Strategy that turns a normalized task into a generation. ``(task, attempt,
+#: last_outcome) -> GenerationRequest`` — async so it can call out (e.g. to a
+#: coding agent over A2A). ``attempt`` is 1-based; ``last_outcome`` is the prior
+#: failed build (with Kaniko logs) on a retry, else ``None``.
+CodeAuthor = Callable[
+    [Mapping[str, Any], int, Optional[BuildOutcome]], Awaitable[GenerationRequest]
+]
 
 
 class TaskAgent(BaseAgent, abc.ABC):
@@ -374,6 +388,62 @@ class TaskAgent(BaseAgent, abc.ABC):
         return f"Could not build the requested generation: {reason}"
 
 
+class DelegatingTaskAgent(TaskAgent):
+    """A concrete :class:`TaskAgent` that authors via an injected strategy.
+
+    The channel-agnostic self-evolution driver: it owns the author → build →
+    (fix) → build loop (inherited) and turns a task into a generation by
+    delegating to a pluggable :data:`CodeAuthor` — in a real deployment, an
+    LLM-backed coding agent reached over A2A. Channel adapters (e.g. the Slack
+    gateway :class:`~atrium.agents.task_agent.slack.SlackTaskAgent`) forward
+    normalized tasks *here* over A2A rather than subclassing it, so ingress/egress
+    concerns stay out of the orchestration engine.
+    """
+
+    AGENT_SLUG = "task_agent"
+
+    def __init__(
+        self,
+        agent_id: str,
+        version: "str | VersionTag | None" = None,
+        *,
+        builder: Union[BaseAgent, SendTarget],
+        author: Optional[CodeAuthor] = None,
+        sandbox_config: Optional[SandboxConfig] = None,
+        registry_endpoint: Optional[str] = None,
+        max_build_attempts: int = 3,
+    ) -> None:
+        super().__init__(
+            agent_id,
+            version,
+            builder=builder,
+            sandbox_config=sandbox_config,
+            registry_endpoint=registry_endpoint,
+            max_build_attempts=max_build_attempts,
+        )
+        self._author = author
+
+    async def author_generation(
+        self,
+        task: Mapping[str, Any],
+        *,
+        attempt: int,
+        last_outcome: Optional[BuildOutcome],
+    ) -> GenerationRequest:
+        """Delegate to the configured :data:`CodeAuthor`.
+
+        Subclasses may instead override this method directly and leave ``author``
+        unset; the default requires one so a bare agent fails loudly rather than
+        silently doing nothing.
+        """
+        if self._author is None:
+            raise AgentError(
+                f"{type(self).__name__} has no code author configured; pass "
+                "author=... or override author_generation()"
+            )
+        return await self._author(task, attempt, last_outcome)
+
+
 def _task_defaults() -> SandboxConfig:
-    """Default TaskAgent sandbox envelope: WAN-capable (Slack), no Docker socket."""
+    """Default TaskAgent sandbox envelope: WAN-capable (reach the builder), no Docker socket."""
     return SandboxConfig(network=NetworkMode.BRIDGE, internal=False)
