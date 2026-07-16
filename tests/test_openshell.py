@@ -62,35 +62,47 @@ def test_require_cli_raises_when_absent(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Sandbox.create — argument assembly                                           #
 # --------------------------------------------------------------------------- #
-def test_create_sets_policy_then_creates(fake_run):
+def test_create_applies_policy_at_create(fake_run):
     calls, _ = fake_run
     cfg = SandboxConfig(network=NetworkMode.INTERNAL)
     sb = asyncio.run(Sandbox.create("local-registry/foo:1.0.0", cfg, name="foo"))
     assert sb.is_running is True
-    # policy applied before create.
-    assert calls[0]["args"][:2] == ["policy", "set"]
+    # The policy is applied *at* create via `--policy` (the CLI's `policy set`
+    # targets an already-running sandbox), so there is no separate policy call.
+    assert not any(c["args"][:2] == ["policy", "set"] for c in calls)
     create = _args_of(calls, "sandbox create")
-    assert "--from" in create["args"] and "local-registry/foo:1.0.0" in create["args"]
-    assert "--name" in create["args"] and "foo" in create["args"]
+    a = create["args"]
+    assert "--from" in a and "local-registry/foo:1.0.0" in a
+    assert "--name" in a and "foo" in a
+    assert "--policy" in a
+    # A no-op command + no PTY so create returns and leaves the sandbox running.
+    assert "--no-tty" in a
+    assert a[-2:] == ["--", "true"]
 
 
-def test_create_adds_gpu_cpu_memory_volume_env(fake_run):
+def test_create_adds_gpu_cpu_memory_env(fake_run):
     calls, _ = fake_run
     cfg = SandboxConfig(
         device_requests=[GPURequest()],
         cpus=4.0,
-        memory="8g",
-        volumes={"/host/data": "/data"},
+        memory="8Gi",
         env={"FOO": "bar"},
     )
     asyncio.run(Sandbox.create("img", cfg, name="gpu1"))
     create = _args_of(calls, "sandbox create")
     a = create["args"]
     assert "--gpu" in a
-    assert a[a.index("--cpus") + 1] == "4.0"
-    assert a[a.index("--memory") + 1] == "8g"
-    assert "/host/data:/data" in a
+    assert a[a.index("--cpu") + 1] == "4.0"
+    assert a[a.index("--memory") + 1] == "8Gi"
     assert "FOO=bar" in a
+
+
+def test_create_rejects_volumes(fake_run):
+    # The OpenShell CLI has no host bind-mount flag; requesting one must fail
+    # loudly rather than be silently dropped.
+    cfg = SandboxConfig(volumes={"/host/data": "/data"})
+    with pytest.raises(SandboxError, match="volume mounts are not supported"):
+        asyncio.run(Sandbox.create("img", cfg, name="vol"))
 
 
 def test_create_forwards_secret_env_by_name_only(fake_run, monkeypatch):
@@ -106,15 +118,6 @@ def test_create_forwards_secret_env_by_name_only(fake_run, monkeypatch):
     assert "s3cr3t" not in a
     # ...it's handed to the child via env instead.
     assert create["env"]["GH_TOKEN"] == "s3cr3t"
-
-
-def test_create_raises_when_policy_set_fails(fake_run):
-    calls, outcomes = fake_run
-    outcomes["policy set"] = ExecutionResult(
-        command="policy set", exit_code=1, stderr="denied"
-    )
-    with pytest.raises(SandboxError, match="policy set failed"):
-        asyncio.run(Sandbox.create("img", SandboxConfig(), name="bad"))
 
 
 def test_create_raises_when_create_fails(fake_run):
@@ -140,7 +143,7 @@ def test_exec_uses_login_shell(fake_run):
     sb = Sandbox(name="x", image="img", config=SandboxConfig(), _running=True)
     asyncio.run(sb.exec("echo hi"))
     args = calls[-1]["args"]
-    assert args == ["sandbox", "exec", "x", "--", "bash", "-lc", "echo hi"]
+    assert args == ["sandbox", "exec", "--name", "x", "--", "bash", "-lc", "echo hi"]
 
 
 def test_delete_when_running(fake_run):

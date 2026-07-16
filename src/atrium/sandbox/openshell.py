@@ -141,7 +141,10 @@ class Sandbox:
         name = name or f"atrium-{uuid.uuid4().hex[:12]}"
         sandbox = cls(name=name, image=image, config=config)
 
-        # 1) Apply the egress/permission policy.
+        # Resolve the egress/permission policy. The OpenShell CLI applies the
+        # policy at *create* time via `--policy` (its `policy set` subcommand
+        # targets an already-running sandbox), so we pass it to create rather
+        # than in a separate pre-create step.
         policy_path = config.policy_path
         tmp_path: Optional[str] = None
         if policy_path is None:
@@ -153,22 +156,23 @@ class Sandbox:
             handle.close()
             policy_path = tmp_path = handle.name
         try:
-            result = await _run("policy", "set", name, "--policy", policy_path)
-            if not result.succeeded:
-                raise SandboxError(
-                    f"openshell policy set failed for {name}: {result.stderr.strip()}"
-                )
-
-            # 2) Create the sandbox container.
+            # Create the sandbox container with its policy applied.
             args = ["sandbox", "create", "--from", image, "--name", name]
+            args.extend(["--policy", policy_path])
             for gpu in config.device_requests:
                 args.extend(gpu.as_cli_flags())
             if config.cpus is not None:
-                args.extend(["--cpus", str(config.cpus)])
+                args.extend(["--cpu", str(config.cpus)])
             if config.memory is not None:
                 args.extend(["--memory", config.memory])
-            for host, container in config.volumes.items():
-                args.extend(["--volume", f"{host}:{container}"])
+            if config.volumes:
+                # The OpenShell CLI has no host bind-mount flag for sandboxes
+                # (its Docker driver is docker-outside-of-docker); fail loudly
+                # rather than silently dropping a requested mount.
+                raise SandboxError(
+                    f"sandbox {name}: host volume mounts are not supported by the "
+                    f"OpenShell CLI (requested: {sorted(config.volumes)})"
+                )
             for key, value in config.env.items():
                 args.extend(["--env", f"{key}={value}"])
 
@@ -185,6 +189,11 @@ class Sandbox:
                     "forwarding %d secret env var(s) to sandbox %s: %s",
                     len(secrets), name, sorted(secrets),  # names only, never values
                 )
+
+            # `sandbox create` with no initial command opens an interactive
+            # session and blocks; disable the PTY and hand it a no-op so it
+            # provisions, returns, and leaves the sandbox running for `exec`.
+            args.extend(["--no-tty", "--", "true"])
 
             result = await _run(*args, env=child_env)
             if not result.succeeded:
@@ -206,8 +215,11 @@ class Sandbox:
         """Execute ``command`` inside the running sandbox via a login shell."""
         if not self._running:
             raise SandboxError(f"sandbox {self.name} is not running")
+        # The exec subcommand takes the sandbox name as the `--name` flag; the
+        # positional args after `--` are the command to run.
         return await _run(
-            "sandbox", "exec", self.name, "--", "bash", "-lc", command, timeout=timeout
+            "sandbox", "exec", "--name", self.name, "--", "bash", "-lc", command,
+            timeout=timeout,
         )
 
     async def delete(self) -> None:

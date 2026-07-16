@@ -53,7 +53,7 @@ def build_sandbox_config(
     *,
     repository: str = BASE_IMAGE_REPOSITORY,
     network: NetworkMode = NetworkMode.BRIDGE,
-    memory: Optional[str] = "4g",
+    memory: Optional[str] = "4Gi",
     cpus: Optional[float] = 2.0,
     env: Optional[Mapping[str, str]] = None,
     gh_token: Optional[str] = None,
