@@ -22,6 +22,14 @@ dependencies = [
     # (Prefect server + Postgres + Phoenix) — see atrium.orchestration.bootstrap.
     "python-on-whales>=0.71",
     "semver>=3.0.4",
+    # The OpenShell CLI — the sandbox runtime `atrium.sandbox` drives. Every agent
+    # runs inside an OpenShell sandbox, so it is a core dependency (installed by
+    # default). OpenShell publishes only manylinux_2_39 wheels (glibc >= 2.39), so
+    # on older hosts it is built from source with maturin against the local glibc.
+    # That build needs a Rust toolchain + the Z3 dev library (z3-sys): run
+    # `scripts/build-openshell.sh`, which provisions both without root and sets the
+    # build env before `uv sync`.
+    "openshell",
 ]
 
 [dependency-groups]
@@ -29,6 +37,10 @@ dev = [
     "pytest>=8.0",
     "pyyaml>=6.0",
 ]
+
+[tool.uv.sources]
+# Build OpenShell from source (maturin) instead of the glibc-2.39 PyPI wheels.
+openshell = { git = "https://github.com/NVIDIA/OpenShell" }
 
 [build-system]
 requires = ["uv_build>=0.9.9,<0.10.0"]
