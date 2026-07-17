@@ -23,6 +23,7 @@ from atrium.agents.control_plane.protocol import (
     parse_submit_request,
     parse_submitted_reply,
 )
+from atrium.agents.plan_agent_protocol import build_plan_result, parse_plan_request
 from atrium.core.types import NetworkMode
 from atrium.protocol import data_part, get_message_data, metadata_dict, text_message
 
@@ -350,3 +351,147 @@ def test_job_update_roundtrip():
     assert parsed["result"] == {"digest": "sha256:abc"}
     # A non-update message parses to empty.
     assert parse_job_update(build_submitted_reply("x")) == {}
+
+
+# --------------------------------------------------------------------------- #
+# Plan path: submit(plan) -> PlanAgent proposes flow -> Job gate -> workboard  #
+# --------------------------------------------------------------------------- #
+_VALID_FLOW = "from prefect import flow\n\n@flow\ndef main():\n    return 1\n"
+
+
+def _script_plan(monkeypatch, *, flow_source=_VALID_FLOW, params=None, requirements=None,
+                 status="ok", reason="", run_id="flow-run-plan"):
+    """Script the plan agent (via send_a2a_message) and the submit_workboard seam.
+
+    Returns a dict with ``plan_requests`` (what the planner was asked) and ``kicks``
+    (the workboards submitted), so a test can assert on both ends without a backend.
+    """
+    captured: dict = {"plan_requests": [], "kicks": []}
+
+    async def fake_send(self, target, message):
+        captured["plan_requests"].append({"target": target, "req": parse_plan_request(message)})
+        return build_plan_result(
+            flow_source, params or {"x": 1}, requirements=requirements, reason=reason, status=status
+        )
+
+    async def fake_submit_workboard(workboard, **kw):
+        captured["kicks"].append({"workboard": workboard, **kw})
+        return run_id
+
+    monkeypatch.setattr(ControlPlaneAgent, "send_a2a_message", fake_send)
+    monkeypatch.setattr(
+        "atrium.agents.control_plane.agent.submit_workboard", fake_submit_workboard
+    )
+    return captured
+
+
+def _plan_submit(instruction="build a report", **payload_extra):
+    payload = {"plan": True, "request": {"instruction": instruction}}
+    payload.update(payload_extra)
+    return build_submit_request("", instruction, context_id="slack:C1:7", payload=payload)
+
+
+def test_plan_turn_dispatches_and_kicks_execution_workboard(monkeypatch):
+    cap = _script_plan(monkeypatch)
+    agent = _agent(plan_agent="plan_agent:active", deployment="prod")
+    reply = asyncio.run(agent.dispatch(_plan_submit()))
+
+    # It asked the plan agent to plan the request...
+    assert len(cap["plan_requests"]) == 1
+    assert cap["plan_requests"][0]["target"] == "plan_agent:active"
+    assert cap["plan_requests"][0]["req"].request == {"instruction": "build a report"}
+
+    # ...and, the plan being ready, kicked exactly one execution workboard.
+    assert len(cap["kicks"]) == 1
+    kick = cap["kicks"][0]
+    wb = kick["workboard"]
+    node = wb.nodes[0]
+    assert node.id == "run_flow"
+    assert node.agent == "prefect_runner_agent:active"
+    assert node.reviewable is True
+    assert node.payload["files"]["flow.py"] == _VALID_FLOW
+    assert node.payload["commands"] == ["python flow.py"]
+    assert kick["deployment"] == "prod"
+    assert kick["context_id"] == "slack:C1:7"
+
+    # The ack carries the flow-run id.
+    assert parse_submitted_reply(reply) == {"status": "ok", "job_id": "flow-run-plan"}
+
+
+def test_plan_reviewer_adds_pre_execution_source_review(monkeypatch):
+    cap = _script_plan(monkeypatch)
+    agent = _agent(plan_agent="plan_agent:active", plan_reviewer="flow_reviewer:active")
+    asyncio.run(agent.dispatch(_plan_submit()))
+
+    wb = cap["kicks"][0]["workboard"]
+    assert [n.id for n in wb.nodes] == ["review_source", "run_flow"]
+    assert wb.nodes[0].agent == "flow_reviewer:active"
+    assert wb.nodes[1].depends_on == ["review_source"]
+
+
+def test_not_ready_plan_kicks_nothing(monkeypatch):
+    # A fail-closed plan error (empty flow) must never reach a workboard.
+    cap = _script_plan(monkeypatch, flow_source="", status="error", reason="no python block")
+    agent = _agent(plan_agent="plan_agent:active")
+    reply = asyncio.run(agent.dispatch(_plan_submit()))
+
+    assert cap["kicks"] == []
+    parsed = parse_submitted_reply(reply)
+    assert parsed["status"] == "error"
+    assert "not ready" in parsed["job_id"]
+
+
+def test_plan_requiring_unavailable_library_is_rejected(monkeypatch):
+    # Planner declares a dep outside the deployment's allow-list → rejected pre-run.
+    cap = _script_plan(monkeypatch, requirements=["requests"])
+    agent = _agent(
+        plan_agent="plan_agent:active",
+        plan_constraints={"allowed_libraries": ["prefect"]},
+    )
+    reply = asyncio.run(agent.dispatch(_plan_submit()))
+    assert cap["kicks"] == []
+    parsed = parse_submitted_reply(reply)
+    assert parsed["status"] == "error"
+    assert "unavailable" in parsed["job_id"]
+
+
+def test_broken_flow_syntax_is_gated(monkeypatch):
+    cap = _script_plan(monkeypatch, flow_source="def broken(:\n  pass")
+    agent = _agent(plan_agent="plan_agent:active")
+    reply = asyncio.run(agent.dispatch(_plan_submit()))
+    assert cap["kicks"] == []
+    assert parse_submitted_reply(reply)["status"] == "error"
+
+
+def test_plan_flag_ignored_without_plan_agent(monkeypatch):
+    # No plan agent configured → a plan-flagged turn falls through to the fast path.
+    calls = _script_kick(monkeypatch, job_id="flow-run-fast")
+    agent = _agent()  # no plan_agent
+    reply = asyncio.run(agent.dispatch(_plan_submit()))
+    assert len(calls) == 1  # single-node fast path ran
+    assert parse_submitted_reply(reply) == {"status": "ok", "job_id": "flow-run-fast"}
+
+
+def test_plan_agent_and_reviewer_read_from_env(monkeypatch):
+    monkeypatch.setenv("ATRIUM_PLAN_AGENT", "plan_agent:active")
+    monkeypatch.setenv("ATRIUM_PLAN_REVIEWER", "flow_reviewer:active")
+    agent = _agent()  # no explicit plan_agent/plan_reviewer args
+    assert agent.plan_agent == "plan_agent:active"
+    assert agent.plan_reviewer == "flow_reviewer:active"
+
+
+def test_explicit_plan_agent_overrides_env(monkeypatch):
+    monkeypatch.setenv("ATRIUM_PLAN_AGENT", "env_agent:active")
+    agent = _agent(plan_agent="explicit_agent:active")
+    assert agent.plan_agent == "explicit_agent:active"
+
+
+def test_non_plan_turn_keeps_fast_path_even_with_plan_agent(monkeypatch):
+    # A turn WITHOUT payload["plan"] is untouched even when a plan agent exists.
+    calls = _script_kick(monkeypatch, job_id="flow-run-direct")
+    agent = _agent(plan_agent="plan_agent:active")
+    msg = build_submit_request("coder:active", "just chat", context_id="slack:C1:9")
+    reply = asyncio.run(agent.dispatch(msg))
+    assert len(calls) == 1
+    assert calls[0]["agent"] == "coder:active"
+    assert parse_submitted_reply(reply) == {"status": "ok", "job_id": "flow-run-direct"}

@@ -1,0 +1,48 @@
+# OpenShell sandbox policy for the PrefectRunnerAgent — least privilege.
+#
+# Tighter than the code-workspace envelope it derives from. A code workspace opens
+# an L7 egress allow-list to GitHub + the Python registries (it must push code and
+# fetch dependencies); a flow runner needs neither. Everything a generated flow
+# imports is baked into the image, and its only outward action is dispatching to
+# subagents over A2A on the host-local control LAN — which comes from the sandbox's
+# NetworkMode.INTERNAL (no WAN NIC), not from any entry here.
+#
+# So `network_policies` is deliberately EMPTY: WAN egress is default-deny, and the
+# control-LAN A2A reach is governed by the network mode, not an L7 host allow-list.
+# The rest of the isolation (non-root process, Landlock filesystem confinement) is
+# kept identical to the code-workspace base.
+#
+# Referenced via SandboxConfig.policy_path (see sandbox/config.py). Targets the
+# OpenShell CLI policy schema (version 1); exact schema may vary with the installed
+# OpenShell version — pin/adjust as needed.
+version: 1
+
+# Static: locked at sandbox creation. Any path not listed is inaccessible;
+# `include_workdir: true` also adds the sandbox workdir (/workspace) to read_write.
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /proc, /dev/urandom, /app, /etc, /var/log]
+  read_write:
+    - /workspace          # where flow.py / params.json are staged and run
+    - /sandbox            # OpenShell's default home/scratch for the sandbox user
+    - /home/sandbox       # caches, the Prefect home
+    - /home/coder         # inherited image's home (Prefect home, uv cache)
+    - /tmp
+    - /dev/null
+
+# Static: highest Landlock ABI the host supports; skip missing paths rather than
+# failing the whole ruleset.
+landlock:
+  compatibility: best_effort
+
+# Static: unprivileged identity for the agent process (root is rejected). Combined
+# with the (code-enforced) absence of any docker.sock mount and the WAN-isolated
+# network mode, the runner can neither reach the host daemon nor egress to the WAN.
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+# Dynamic: default-deny egress with NO WAN allow-list. A generated flow reaches
+# subagents over A2A on the host-local control LAN (governed by NetworkMode.INTERNAL),
+# and nothing on the public internet.
+network_policies: {}

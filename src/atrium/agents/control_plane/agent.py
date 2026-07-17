@@ -21,6 +21,8 @@ scripted kick and no Prefect backend.
 from __future__ import annotations
 
 import logging
+import os
+import uuid
 from typing import Any, Optional
 
 from atrium.agents.control_plane.protocol import (
@@ -29,9 +31,16 @@ from atrium.agents.control_plane.protocol import (
     build_submitted_reply,
     parse_submit_request,
 )
+from atrium.agents.plan_agent_protocol import build_plan_request, parse_plan_result
 from atrium.core.base_agent import BaseAgent
 from atrium.core.types import SandboxConfig, VersionTag, wan_sandbox_config
-from atrium.orchestration.kick import submit_job, workboard_state
+from atrium.orchestration.job import (
+    DEFAULT_EXECUTOR_AGENT,
+    Job,
+    build_execution_workboard,
+    unsupported_requirements,
+)
+from atrium.orchestration.kick import submit_job, submit_workboard, workboard_state
 from atrium.orchestration.review import ReviewPolicy
 from atrium.protocol import Message
 from atrium.protocol.a2a_transport import SendTarget
@@ -46,6 +55,11 @@ DEFAULT_INITIAL_VERSION = "0.1.0"
 #: Doer used when a submit names no explicit agent (D5 — the interface forwards a
 #: turn and the control plane routes; a coding turn defaults to a code workspace).
 DEFAULT_DOER = "python_code_workspace_agent:active"
+
+#: Env vars that configure the plan path by deployment (mirrors ``ATRIUM_REVIEWER``),
+#: so the plan agent / pre-execution reviewer can be turned on without code.
+PLAN_AGENT_ENV = "ATRIUM_PLAN_AGENT"
+PLAN_REVIEWER_ENV = "ATRIUM_PLAN_REVIEWER"
 
 #: ``job_update`` status that asks the interface to present a deliverable for human
 #: review (動線2b, async ticket) rather than reporting a terminal outcome.
@@ -68,6 +82,10 @@ class ControlPlaneAgent(BaseAgent):
         deployment: str = "default",
         default_agent: str = DEFAULT_DOER,
         interface: Optional[SendTarget] = None,
+        plan_agent: Optional[SendTarget] = None,
+        plan_executor: str = DEFAULT_EXECUTOR_AGENT,
+        plan_reviewer: Optional[str] = None,
+        plan_constraints: Optional[dict[str, Any]] = None,
         sandbox_config: Optional[SandboxConfig] = None,
     ) -> None:
         super().__init__(
@@ -77,6 +95,22 @@ class ControlPlaneAgent(BaseAgent):
         self.deployment = deployment
         #: The doer a turn routes to when it names no explicit agent override.
         self.default_agent = default_agent
+        #: The plan agent (evolvable, LLM) that drafts a job's flow + params from a
+        #: request. ``None`` disables planning (every turn keeps the single-node
+        #: fast path); when set, a turn carrying ``payload["plan"]`` is planned.
+        #: Falls back to the ``ATRIUM_PLAN_AGENT`` env so a deployment can enable the
+        #: plan path without code (mirrors ``ATRIUM_REVIEWER``).
+        self.plan_agent = plan_agent or os.environ.get(PLAN_AGENT_ENV) or None
+        #: The minimal-privilege executor a planned flow runs on.
+        self.plan_executor = plan_executor
+        #: Optional reviewer for the **pre-execution** source review of a generated
+        #: flow (Phase 2). When set, the execution board reviews the flow *before*
+        #: it runs; when None, only the run-level (post-execution) gate applies.
+        #: Falls back to the ``ATRIUM_PLAN_REVIEWER`` env.
+        self.plan_reviewer = plan_reviewer or os.environ.get(PLAN_REVIEWER_ENV) or None
+        #: What the planner must plan within (dispatchable subagent roster, allowed
+        #: libraries, caps). Rides in every ``plan_request``.
+        self.plan_constraints = dict(plan_constraints or {})
         #: The interface to push a :func:`job_update <build_job_update>` to when a
         #: job finishes (D6). ``None`` disables the push (poll-only / no delivery).
         self.interface = interface
@@ -93,6 +127,10 @@ class ControlPlaneAgent(BaseAgent):
         if req.feedback_for is not None:
             # 動線2(b): a human reply resolving an open review ticket (async).
             return await self._resolve_ticket(req, message)
+        if self._wants_plan(req):
+            # A planned turn: draft a flow via the plan agent, then run it (gated
+            # on readiness) as a review-gated workboard. See the plan path below.
+            return await self._handle_plan(req, message)
         target = self._route(req)
         if not target:
             return build_submitted_reply("no doer agent and no default configured", request=message, status="error")
@@ -135,6 +173,83 @@ class ControlPlaneAgent(BaseAgent):
             context_id=req.context_id,
             review=ReviewPolicy.from_dict(req.review),
             deployment=self.deployment,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Plan path — request → PlanAgent proposes flow → Job → run (D-plan)  #
+    # ------------------------------------------------------------------ #
+    def _wants_plan(self, req: SubmitRequest) -> bool:
+        """Whether this turn should be planned (a plan agent is configured and asked).
+
+        Gated on an explicit ``payload["plan"]`` so a plain direct-doer submit is
+        untouched: planning is opt-in per turn, only when a plan agent exists.
+        """
+        return self.plan_agent is not None and bool(req.payload.get("plan"))
+
+    async def _handle_plan(self, req: SubmitRequest, message: Message) -> Message:
+        """Draft a job via the plan agent, gate on readiness, then run it.
+
+        The plan agent only *proposes* the flow + params; the control plane
+        assembles a :class:`Job`, and a job that is not ready (missing or
+        unparseable flow — including a fail-closed plan error) never reaches a
+        workboard. A ready job runs as a review-gated execution workboard.
+        """
+        job, reason = await self._plan(req)
+        if not job.is_ready():
+            logger.info("plan for context %s not ready: %s", req.context_id, reason)
+            return build_submitted_reply(
+                f"plan not ready: {reason}", request=message, status="error"
+            )
+        # The runner is WAN-isolated: a flow can only import what its image ships.
+        # Reject a plan needing a library outside the configured allow-list *before*
+        # it runs, rather than letting it fail with an import error mid-flight.
+        missing = unsupported_requirements(job.requirements, self.plan_constraints.get("allowed_libraries"))
+        if missing:
+            logger.info("plan for context %s needs unavailable libraries: %s", req.context_id, missing)
+            return build_submitted_reply(
+                f"plan requires unavailable libraries: {missing}", request=message, status="error"
+            )
+        job_id = await self._kick_job(job, req)
+        self._track(job_id, req, self.plan_executor)
+        logger.info("kicked planned job %s (executor %s)", job_id, self.plan_executor)
+        return build_submitted_reply(job_id, request=message)
+
+    async def _plan(self, req: SubmitRequest) -> "tuple[Job, str]":
+        """Ask the plan agent to draft a flow + params; assemble a :class:`Job`.
+
+        Returns the job plus the planner's reason (surfaced when the job is not
+        ready). The dispatch rides :meth:`send_a2a_message` — the same seam tests
+        script — so no plan agent needs to be live to exercise this path.
+        """
+        request_json = dict(req.payload.get("request") or {"instruction": req.instruction})
+        plan_msg = build_plan_request(
+            request_json,
+            req.instruction,
+            context_id=req.context_id,
+            constraints=self.plan_constraints,
+        )
+        reply = await self.send_a2a_message(self.plan_agent, plan_msg)
+        result = parse_plan_result(reply)
+        job = Job(
+            id=f"job-{uuid.uuid4().hex[:12]}",
+            request=request_json,
+            flow_source=result.get("flow_source", ""),
+            params=dict(result.get("params") or {}),
+            requirements=list(result.get("requirements") or []),
+            plan_reason=result.get("reason", ""),
+        )
+        return job, result.get("reason") or result.get("status", "error")
+
+    async def _kick_job(self, job: Job, req: SubmitRequest) -> str:
+        """Run a ready ``job`` as a review-gated execution workboard; return its run id."""
+        workboard = build_execution_workboard(
+            job, executor_agent=self.plan_executor, reviewer_agent=self.plan_reviewer
+        )
+        return await submit_workboard(
+            workboard,
+            deployment=self.deployment,
+            context_id=req.context_id,
+            review=ReviewPolicy.from_dict(req.review),
         )
 
     # ------------------------------------------------------------------ #
