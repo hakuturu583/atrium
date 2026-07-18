@@ -170,6 +170,14 @@ imports the plan contract and the `Job`/protocol surface from core.
   non-root, exit 0); reproducible via `scripts/build-prefect-runner.sh`.
 - **DONE** — runner image slimmed to 843 MB via a multi-stage build
   ([#32](https://github.com/hakuturu583/atrium/issues/32)).
+- **DONE (validated end-to-end on GPU)** — the full slice was exercised on a real
+  model: a request → the planner role on a code LLM (served OpenAI-compatibly; the
+  bridge's `TABBY_BASE_URL` points at any such backend) generated a valid 2-task
+  flow (`coder`→`reviewer` dispatch) → `Job.is_ready()` → the runner image executed
+  it WAN-isolated → real A2A `atrium_dispatch` to a subagent → replies aggregated →
+  flow completed (exit 0). This surfaced and fixed a real bug — atrium messages
+  lacked the A2A-required `message_id` (`fix(protocol)`), which a compliant server
+  rejects — so cross-agent dispatch had never actually round-tripped before.
 - **TODO** — register `prefect_runner_agent:active` (and any dispatchable subagent
   slugs) as active generations the OpenShell gateway serves; stand up a GPU
   inference backend (`tabby_llm_agent`) an instance can carry the planner role on;
