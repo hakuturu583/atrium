@@ -58,6 +58,9 @@ def main():
 if __name__ == "__main__":
     main()
 PY
+# mktemp -d is 0700 owned by the host user; make it readable by the container's
+# non-root `coder` (uid 10001) so the mounted flow.py can actually be opened.
+chmod -R a+rX "$WORK"
 
 if docker run --rm --network none -v "$WORK:/workspace" -w /workspace "$RUNNER_TAG" \
         python flow.py | grep -q "SMOKE_OK"; then

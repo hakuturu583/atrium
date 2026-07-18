@@ -17,17 +17,42 @@
 # baked in here — there is no runtime package fetch. Built by the BuilderAgent with
 # rootless Kaniko and pushed to local-registry/prefect_runner_agent:<version>.
 #
+# **Multi-stage** so the ~4 GB uv download cache stays in the throwaway builder and
+# never lands in the final image: the runtime stage COPYs only the finished venv.
+# (A single-stage build also duplicated that cache a second time via `chown -R`,
+# taking the image to ~8.5 GB — see issue #32.)
+#
 #   docker build -t local-registry/prefect_runner_agent:0.1.0 \
 #       --build-arg BASE_IMAGE=local-registry/python_code_workspace_agent:0.1.0 \
 #       -f src/atrium/agents/prefect_runner_agent/sandbox/Dockerfile .
 
 ARG BASE_IMAGE=local-registry/python_code_workspace_agent:0.1.0
-FROM ${BASE_IMAGE}
 
-# Toolchain install needs root; drop back to the inherited non-root user at the end.
+# --------------------------------------------------------------------------- #
+# Builder — install atrium (+ its prefect>=3 dep) into a self-contained venv.  #
+# The uv cache lives here and is discarded with the stage.                     #
+# --------------------------------------------------------------------------- #
+FROM ${BASE_IMAGE} AS builder
+USER root
+# Cache in /tmp (thrown away with the stage), not under the runtime home.
+ENV UV_CACHE_DIR=/tmp/uv-cache
+# atrium is not on PyPI — install it from the build context, never a remote fetch.
+COPY pyproject.toml README.md /opt/atrium/
+COPY src /opt/atrium/src
+RUN uv venv /opt/venv \
+    && uv pip install --python /opt/venv/bin/python /opt/atrium \
+    && rm -rf /tmp/uv-cache
+
+# --------------------------------------------------------------------------- #
+# Runtime — only the finished venv + the dispatch primitive. No build caches.  #
+# --------------------------------------------------------------------------- #
+FROM ${BASE_IMAGE}
 USER root
 
-ENV UV_CACHE_DIR=/home/coder/.cache/uv \
+# The venv is first on PATH so `python flow.py` resolves the flow runtime, and the
+# trusted dispatch primitive is importable as `atrium_dispatch`.
+ENV PATH=/opt/venv/bin:$PATH \
+    PYTHONPATH=/usr/local/lib/atrium_dispatch \
     # Ephemeral/local Prefect: no server, no worker — the flow runs to completion
     # in-process inside this sandbox and reports via exit code / stdout.
     PREFECT_API_URL="" \
@@ -40,27 +65,13 @@ ENV UV_CACHE_DIR=/home/coder/.cache/uv \
     # telemetry service would only emit a DNS-failure ERROR. Disable it at the source.
     PREFECT_SERVER_ANALYTICS_ENABLED=false
 
-# The atrium core provides the A2A transport the trusted `atrium_dispatch` primitive
-# wraps, and it already depends on `prefect>=3`, so installing it from the local
-# source (uv is inherited from the Python base) brings the whole flow runtime. It is
-# not on PyPI — install the package from the build context, never a remote fetch.
-# Install into a dedicated venv (the base's system Python is PEP-668 externally
-# managed) and put it first on PATH so `python flow.py` resolves the flow runtime.
-COPY pyproject.toml README.md /opt/atrium/
-COPY src /opt/atrium/src
-RUN uv venv /opt/venv \
-    && uv pip install --python /opt/venv/bin/python /opt/atrium
-ENV PATH=/opt/venv/bin:$PATH
-
-# The trusted dispatch primitive, importable as `atrium_dispatch` from generated
-# flow code (`from atrium_dispatch import atrium_dispatch`).
+COPY --from=builder /opt/venv /opt/venv
 COPY src/atrium/agents/prefect_runner_agent/sandbox/dispatch.py /usr/local/lib/atrium_dispatch/atrium_dispatch.py
-ENV PYTHONPATH=/usr/local/lib/atrium_dispatch
 
 # Build-time assertion that the runtime materialised (fail a half-provisioned image
-# early) and prepare the writable Prefect home for the non-root user.
+# early) and prepare the writable Prefect home for the non-root user (no recursive
+# chown — `install -d` creates it already owned).
 RUN python3 -c "import prefect, atrium_dispatch" \
-    && mkdir -p /home/coder/.prefect \
-    && chown -R coder:coder /home/coder/.prefect /home/coder/.cache
+    && install -d -o coder -g coder /home/coder/.prefect
 
 USER coder
