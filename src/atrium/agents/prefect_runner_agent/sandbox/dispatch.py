@@ -27,11 +27,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from functools import lru_cache
 from typing import Any, Mapping, Optional
 
 from atrium.protocol import (
-    get_message_data,
     get_message_text,
+    merge_data_parts,
     metadata_dict,
     text_message,
 )
@@ -44,24 +45,26 @@ __all__ = ["atrium_dispatch", "atrium_dispatch_async", "resolve_endpoint"]
 ENDPOINTS_ENV = "ATRIUM_DISPATCH_ENDPOINTS"
 
 
+@lru_cache(maxsize=1)
+def _parse_endpoints(raw: str) -> Mapping[str, str]:
+    """Parse the ``{slug: url}`` allow-list JSON (memoized — the env is process-fixed)."""
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
 def resolve_endpoint(agent: str) -> str:
     """Resolve an agent slug/URL to an A2A base URL (see module docstring)."""
     if agent.startswith("http://") or agent.startswith("https://"):
         return agent
-    endpoints: Mapping[str, str] = {}
-    raw = os.environ.get(ENDPOINTS_ENV)
-    if raw:
-        try:
-            endpoints = json.loads(raw)
-        except (ValueError, TypeError):
-            endpoints = {}
-    if agent in endpoints:
-        return str(endpoints[agent])
-    # Slug without generation (``coder:active`` → ``coder``) and host-local default.
-    slug = agent.split(":", 1)[0]
-    if slug in endpoints:
-        return str(endpoints[slug])
-    return f"http://{slug}.local"
+    endpoints = _parse_endpoints(os.environ.get(ENDPOINTS_ENV) or "")
+    # Try the full slug, then the same without its generation (``coder:active`` → ``coder``).
+    for key in (agent, agent.split(":", 1)[0]):
+        if key in endpoints:
+            return str(endpoints[key])
+    return f"http://{agent.split(':', 1)[0]}.local"
 
 
 async def atrium_dispatch_async(
@@ -82,10 +85,7 @@ async def atrium_dispatch_async(
         instruction, role=Role.ROLE_USER, context_id=context_id, extra_parts=parts
     )
     reply = await send_message(resolve_endpoint(agent), message)
-    data: dict[str, Any] = {}
-    for part in get_message_data(reply):
-        if isinstance(part, dict):
-            data.update(part)
+    data = merge_data_parts(reply)
     status = str(metadata_dict(reply).get("status") or data.get("status") or "ok")
     return {"status": status, "text": get_message_text(reply), "data": data}
 

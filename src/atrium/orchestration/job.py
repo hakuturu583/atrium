@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -162,16 +163,17 @@ REVIEW_NODE_ID = "review_source"
 RUN_NODE_ID = "run_flow"
 
 
+#: First PEP-508 version/extra/marker delimiter — everything after it is stripped.
+_REQ_DELIM_RE = re.compile(r"[\[=<>~!;\s]")
+
+
 def _requirement_name(spec: str) -> str:
     """Reduce a requirement spec to its bare package name for allow-list matching.
 
-    ``prefect==3.7.8`` / ``prefect[extra]`` / ``prefect>=3`` → ``prefect``. Kept
-    conservative: split on the first version/extra/marker delimiter, lowercased.
+    ``prefect==3.7.8`` / ``prefect[extra]`` / ``prefect>=3`` → ``prefect``: split on
+    the first version/extra/marker delimiter (order-independent), lowercased.
     """
-    name = spec.strip()
-    for sep in ("[", "==", ">=", "<=", "~=", ">", "<", "!=", " ", ";"):
-        name = name.split(sep, 1)[0]
-    return name.strip().lower()
+    return _REQ_DELIM_RE.split(spec.strip(), 1)[0].lower()
 
 
 def unsupported_requirements(requirements: list[str], allowed: Optional[list[str]]) -> list[str]:

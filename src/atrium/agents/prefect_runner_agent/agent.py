@@ -37,6 +37,10 @@ class PrefectRunnerAgent(PythonCodeWorkspaceAgent):
     #: A flow runner never runs a test suite; it runs the generated flow directly.
     DEFAULT_TEST_COMMAND = None
 
+    #: The runner holds no GitHub credentials and its job is to run a flow, not to
+    #: publish code — so a git push/PR request is refused at parse time (base gate).
+    ALLOWS_GIT = False
+
     def __init__(
         self,
         agent_id: str,
@@ -87,18 +91,3 @@ class PrefectRunnerAgent(PythonCodeWorkspaceAgent):
         against; everything a generated flow may import is baked into the image.
         """
         return []
-
-    # ------------------------------------------------------------------ #
-    # Request parsing / validation                                       #
-    # ------------------------------------------------------------------ #
-    def _parse_request(self, data):
-        """Parse like a workspace task, but refuse any git *push*/PR sub-request.
-
-        The runner holds no GitHub credentials and its job is to run a flow, not
-        to publish code; a request that asks it to push is a category error and is
-        rejected rather than silently ignored.
-        """
-        spec = super()._parse_request(data)
-        if spec.get("git"):
-            raise ValueError("prefect_runner_agent does not push (git/pull_request not allowed)")
-        return spec

@@ -38,6 +38,7 @@ __all__ = [
     "data_message",
     "get_message_text",
     "get_message_data",
+    "merge_data_parts",
     "metadata_dict",
     "set_metadata",
     # Transport
@@ -134,6 +135,19 @@ def get_message_data(message: Message) -> list[dict[str, Any]]:
             if isinstance(decoded, dict):
                 out.append(decoded)
     return out
+
+
+def merge_data_parts(message: Message) -> dict[str, Any]:
+    """Merge every structured DataPart of ``message`` into one mapping.
+
+    The common shape for a structured A2A request/reply: one logical payload spread
+    across one or more DataParts. Later parts win on key clashes.
+    """
+    merged: dict[str, Any] = {}
+    for part in get_message_data(message):
+        if isinstance(part, dict):
+            merged.update(part)
+    return merged
 
 
 def metadata_dict(message: Message) -> dict[str, Any]:

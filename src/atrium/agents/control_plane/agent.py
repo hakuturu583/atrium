@@ -194,8 +194,9 @@ class ControlPlaneAgent(BaseAgent):
         unparseable flow — including a fail-closed plan error) never reaches a
         workboard. A ready job runs as a review-gated execution workboard.
         """
-        job, reason = await self._plan(req)
+        job = await self._plan(req)
         if not job.is_ready():
+            reason = job.plan_reason or "planner returned no usable plan"
             logger.info("plan for context %s not ready: %s", req.context_id, reason)
             return build_submitted_reply(
                 f"plan not ready: {reason}", request=message, status="error"
@@ -214,12 +215,12 @@ class ControlPlaneAgent(BaseAgent):
         logger.info("kicked planned job %s (executor %s)", job_id, self.plan_executor)
         return build_submitted_reply(job_id, request=message)
 
-    async def _plan(self, req: SubmitRequest) -> "tuple[Job, str]":
+    async def _plan(self, req: SubmitRequest) -> Job:
         """Ask the plan agent to draft a flow + params; assemble a :class:`Job`.
 
-        Returns the job plus the planner's reason (surfaced when the job is not
-        ready). The dispatch rides :meth:`send_a2a_message` — the same seam tests
-        script — so no plan agent needs to be live to exercise this path.
+        The planner's reason rides on :attr:`Job.plan_reason` (surfaced when the job
+        is not ready). The dispatch rides :meth:`send_a2a_message` — the same seam
+        tests script — so no plan agent needs to be live to exercise this path.
         """
         request_json = dict(req.payload.get("request") or {"instruction": req.instruction})
         plan_msg = build_plan_request(
@@ -230,7 +231,7 @@ class ControlPlaneAgent(BaseAgent):
         )
         reply = await self.send_a2a_message(self.plan_agent, plan_msg)
         result = parse_plan_result(reply)
-        job = Job(
+        return Job(
             id=f"job-{uuid.uuid4().hex[:12]}",
             request=request_json,
             flow_source=result.get("flow_source", ""),
@@ -238,7 +239,6 @@ class ControlPlaneAgent(BaseAgent):
             requirements=list(result.get("requirements") or []),
             plan_reason=result.get("reason", ""),
         )
-        return job, result.get("reason") or result.get("status", "error")
 
     async def _kick_job(self, job: Job, req: SubmitRequest) -> str:
         """Run a ready ``job`` as a review-gated execution workboard; return its run id."""

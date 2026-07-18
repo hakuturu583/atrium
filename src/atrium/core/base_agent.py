@@ -32,7 +32,7 @@ from typing import Any, Mapping, Optional, Union
 from atrium.core import telemetry as tel
 from atrium.core.errors import AgentError, PolicyViolationError, SandboxError, SandboxNotRunningError
 from atrium.core.types import ExecutionResult, SandboxConfig, VersionTag
-from atrium.protocol import Message, get_message_data
+from atrium.protocol import Message, merge_data_parts
 from atrium.protocol.a2a_transport import SendTarget, send_message
 from atrium.sandbox import Sandbox
 
@@ -211,14 +211,10 @@ class BaseAgent(abc.ABC):
     def merge_data_parts(message: Message) -> dict[str, Any]:
         """Merge every structured ``DataPart`` of ``message`` into one mapping.
 
-        The common shape for a structured A2A request: a single logical payload
-        spread across one or more ``DataPart``s. Later parts win on key clashes.
+        Thin instance-facing alias for :func:`atrium.protocol.merge_data_parts`
+        (the shared merge rule: later parts win on key clashes).
         """
-        merged: dict[str, Any] = {}
-        for part in get_message_data(message):
-            if isinstance(part, dict):
-                merged.update(part)
-        return merged
+        return merge_data_parts(message)
 
     @staticmethod
     def check_safe_relpath(name: Any) -> None:
