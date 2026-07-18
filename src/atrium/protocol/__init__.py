@@ -11,6 +11,7 @@ wire protocol at the agent boundary.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Iterable, Mapping, Optional
 
 from a2a.types import Artifact, Message, Part, Role, Task
@@ -106,7 +107,10 @@ def _build_message(
     task_id: Optional[str],
     metadata: Optional[Mapping[str, Any]],
 ) -> Message:
-    message = Message(role=role, parts=parts)
+    # A2A (v0.3) requires every message to carry a message_id; a compliant server
+    # rejects one without it (INVALID_PARAMS). Generate one so any atrium-built
+    # message is wire-valid without every caller having to remember.
+    message = Message(role=role, parts=parts, message_id=uuid.uuid4().hex)
     if context_id:
         message.context_id = context_id
     if task_id:

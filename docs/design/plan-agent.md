@@ -4,11 +4,11 @@
 > The Prefect-free core (`atrium.orchestration.job`, `atrium.agents.plan_agent_protocol`),
 > the minimal-privilege executor (`atrium.agents.prefect_runner_agent`), the
 > control-plane plan path (`ControlPlaneAgent`), and the evolvable planner
-> (`atrium_agents.PlanAgent` + `planner`/`flow_reviewer` roles) are in code and
+> (`atrium_agents`' `planner_role` + `flow_reviewer_role`) are in code and
 > unit-tested. The runner image builds and runs a generated flow offline (validated;
 > see `scripts/build-prefect-runner.sh`). What remains is environment wiring:
-> registering the agents as active generations and building the GPU-bound
-> `plan_agent` image. Per-piece status at the end.
+> registering the agents as active generations and serving an inference backend for
+> the planner role. Per-piece status at the end.
 
 ## Problem
 
@@ -25,7 +25,7 @@ become a runnable **job** only once a JSON + Python pair is complete.
 Human turn ──▶ ControlPlaneAgent           [core, trusted]
                  │  (payload["plan"])  build_plan_request
                  ▼
-              PlanAgent                     [atrium_agents, evolvable, LLM]  ── proposes ──▶ flow.py + params
+              Planner  (tabby + planner_role) [atrium_agents, evolvable, LLM]  ── proposes ──▶ flow.py + params
                  │  plan_result
                  ▼
               Job.is_ready()  (both artifacts present, flow parses, main() defined, deps allowed)
@@ -125,10 +125,14 @@ the post-execution gate applies.
 | Repo (tier) | Adds |
 | --- | --- |
 | **core `atrium`** (trusted) | `orchestration.job` (`Job`, `is_ready`, `build_execution_workboard`, `unsupported_requirements`); `agents.plan_agent_protocol` (the plan A2A contract); `agents.prefect_runner_agent` (the executor + its sandbox + the `atrium_dispatch` primitive); the `ControlPlaneAgent` plan path |
-| **`atrium_agents`** (evolvable) | `planner_profile` / `PlannerRole` / `PlanAgent`; `flow_reviewer_profile` / `flow_reviewer_role` |
+| **`atrium_agents`** (evolvable) | `planner_profile` / `PlannerRole` / `planner_role`; `flow_reviewer_profile` / `flow_reviewer_role` |
 
-Dependency direction stays correct (`atrium_agents` → `atrium`): the planner imports
-the plan contract and the `Job`/protocol surface from core.
+A planner is **not a distinct agent** — it is the shared inference engine
+(`TabbyLLMAgent`) handed `planner_role()`, exactly as a coder/reviewer is its role;
+there is no `PlanAgent` class or `plan_agent` slug. The control plane addresses it
+through the `plan_agent` target (a URL, or the engine's slug running the planner
+role). Dependency direction stays correct (`atrium_agents` → `atrium`): the role
+imports the plan contract and the `Job`/protocol surface from core.
 
 ## Configuration
 
@@ -159,13 +163,14 @@ the plan contract and the `Job`/protocol surface from core.
   path (dispatch → Job → readiness/requirements gate → review-gated workboard;
   env config). Unit-tested (`tests/test_job.py`, `tests/test_plan_agent_protocol.py`,
   `tests/test_prefect_runner_agent.py`, `tests/test_control_plane.py`).
-- **DONE** — `atrium_agents`: `planner`/`flow_reviewer` profiles + roles, `PlanAgent`.
-  Unit-tested (`tests/test_role.py`, `tests/test_prompt_profiles.py`,
-  `tests/test_plan_agent.py`).
+- **DONE** — `atrium_agents`: `planner`/`flow_reviewer` profiles + roles (the planner
+  is a role on `TabbyLLMAgent`, not a distinct agent). Unit-tested
+  (`tests/test_role.py`, `tests/test_prompt_profiles.py`, `tests/test_plan_agent.py`).
 - **DONE** — runner image builds + runs a generated flow offline (`--network none`,
   non-root, exit 0); reproducible via `scripts/build-prefect-runner.sh`.
+- **DONE** — runner image slimmed to 843 MB via a multi-stage build
+  ([#32](https://github.com/hakuturu583/atrium/issues/32)).
 - **TODO** — register `prefect_runner_agent:active` (and any dispatchable subagent
-  slugs) as active generations the OpenShell gateway serves; build the GPU-bound
-  `plan_agent` image (a `TabbyLLMAgent` derivative); slim the runner image
-  (~8.5 GB → 1–2 GB, [#32](https://github.com/hakuturu583/atrium/issues/32)); the
-  data-DAG variant (D1 alternative) if generated-code execution is ever undesired.
+  slugs) as active generations the OpenShell gateway serves; stand up a GPU
+  inference backend (`tabby_llm_agent`) an instance can carry the planner role on;
+  the data-DAG variant (D1 alternative) if generated-code execution is ever undesired.
