@@ -129,6 +129,12 @@ class CodeWorkSpaceAgent(BaseAgent):
     #: Subclasses set this to their ecosystem's runner (e.g. ``"pytest"``).
     DEFAULT_TEST_COMMAND: Optional[str] = None
 
+    #: Whether this workspace may accept a git *push*/PR sub-request. A subclass
+    #: with no push mandate (and no forwarded credentials) sets this ``False`` so a
+    #: push request is refused at parse time — the single place a request's allowed
+    #: shape is decided, rather than a downstream parser override.
+    ALLOWS_GIT: bool = True
+
     def __init__(
         self,
         agent_id: str,
@@ -347,6 +353,8 @@ class CodeWorkSpaceAgent(BaseAgent):
             commands.append(self.DEFAULT_TEST_COMMAND)
 
         git = self._coerce_git(data.get("git"))
+        if git and not self.ALLOWS_GIT:
+            raise ValueError(f"{type(self).__name__} does not push (git/pull_request not allowed)")
 
         if not (repo or files or commands or git):
             raise ValueError("empty request: provide at least one of repo/files/commands/git")

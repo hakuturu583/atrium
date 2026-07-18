@@ -11,6 +11,7 @@ wire protocol at the agent boundary.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Iterable, Mapping, Optional
 
 from a2a.types import Artifact, Message, Part, Role, Task
@@ -37,6 +38,7 @@ __all__ = [
     "data_message",
     "get_message_text",
     "get_message_data",
+    "merge_data_parts",
     "metadata_dict",
     "set_metadata",
     # Transport
@@ -106,7 +108,10 @@ def _build_message(
     task_id: Optional[str],
     metadata: Optional[Mapping[str, Any]],
 ) -> Message:
-    message = Message(role=role, parts=parts)
+    # A2A (v0.3) requires every message to carry a message_id; a compliant server
+    # rejects one without it (INVALID_PARAMS). Generate one so any atrium-built
+    # message is wire-valid without every caller having to remember.
+    message = Message(role=role, parts=parts, message_id=uuid.uuid4().hex)
     if context_id:
         message.context_id = context_id
     if task_id:
@@ -130,6 +135,19 @@ def get_message_data(message: Message) -> list[dict[str, Any]]:
             if isinstance(decoded, dict):
                 out.append(decoded)
     return out
+
+
+def merge_data_parts(message: Message) -> dict[str, Any]:
+    """Merge every structured DataPart of ``message`` into one mapping.
+
+    The common shape for a structured A2A request/reply: one logical payload spread
+    across one or more DataParts. Later parts win on key clashes.
+    """
+    merged: dict[str, Any] = {}
+    for part in get_message_data(message):
+        if isinstance(part, dict):
+            merged.update(part)
+    return merged
 
 
 def metadata_dict(message: Message) -> dict[str, Any]:

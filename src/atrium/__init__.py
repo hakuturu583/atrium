@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from atrium.agents.builder_agent import BuilderAgent
 from atrium.agents.control_plane import ControlPlaneAgent
+from atrium.agents.prefect_runner_agent import PrefectRunnerAgent
 from atrium.agents.task_agent import (
     BuildOutcome,
     DelegatingTaskAgent,
@@ -61,6 +62,7 @@ __all__ = [
     "BaseAgent",
     "BuilderAgent",
     "ControlPlaneAgent",
+    "PrefectRunnerAgent",
     "TaskAgent",
     "DelegatingTaskAgent",
     "SlackTaskAgent",
@@ -91,5 +93,6 @@ __all__ = [
 # evolvable agents register themselves from the `atrium_agents` package.
 register_agent_type(BuilderAgent)
 register_agent_type(ControlPlaneAgent)
+register_agent_type(PrefectRunnerAgent)
 register_agent_type(DelegatingTaskAgent)
 register_agent_type(SlackTaskAgent)

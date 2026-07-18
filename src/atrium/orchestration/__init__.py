@@ -61,6 +61,13 @@ from atrium.orchestration.review import (
     build_review_request,
     default_review_policy,
 )
+from atrium.orchestration.job import (
+    DEFAULT_EXECUTOR_AGENT,
+    Job,
+    JobNotReadyError,
+    build_execution_workboard,
+    unsupported_requirements,
+)
 from atrium.orchestration.runner import run_node
 from atrium.orchestration.scheduler import WorkboardScheduler
 from atrium.orchestration.types import (
@@ -84,6 +91,12 @@ __all__ = [
     "BoardUpdate",
     "STATUS_OK",
     "STATUS_ERROR",
+    # Job (request + generated flow pair) and its execution DAG
+    "Job",
+    "JobNotReadyError",
+    "build_execution_workboard",
+    "unsupported_requirements",
+    "DEFAULT_EXECUTOR_AGENT",
     # A2A protocol glue
     "WORKBOARD_UPDATE_TYPE",
     "build_node_request",
